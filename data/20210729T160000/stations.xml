@@ -1,10 +1,10 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <FDSNStationXML xmlns="http://www.fdsn.org/xml/station/1" schemaVersion="1.2">
-  <Source>IRIS-DMC</Source>
-  <Sender>IRIS-DMC</Sender>
-  <Module>IRIS WEB SERVICE: fdsnws-station | version: 1.1.52</Module>
-  <ModuleURI>http://service.iris.edu/fdsnws/station/1/query?starttime=2021-07-29T16%3A00%3A00.000000&amp;endtime=2021-07-30T00%3A00%3A00.000000&amp;network=AV&amp;station=%2A&amp;channel=BHZ%2CBHN%2CBHE%2CSHZ%2CSHN%2CSHE&amp;minlatitude=54.9133&amp;maxlatitude=55.9133&amp;minlongitude=-162.3903&amp;maxlongitude=-161.3903&amp;level=response</ModuleURI>
-  <Created>2026-06-05T18:01:04.820400Z</Created>
+  <Source>EarthScope</Source>
+  <Sender>EarthScope</Sender>
+  <Module>EarthScope WEB SERVICE: fdsnws-station | version: 1.1.56</Module>
+  <ModuleURI>https://service.earthscope.org/fdsnws/station/1/query?starttime=2021-07-29T16%3A00%3A00.000000&amp;endtime=2021-07-30T00%3A00%3A00.000000&amp;network=AV&amp;station=%2A&amp;channel=BHZ%2CBHN%2CBHE%2CSHZ%2CSHN%2CSHE&amp;minlatitude=54.9133&amp;maxlatitude=55.9133&amp;minlongitude=-162.3903&amp;maxlongitude=-161.3903&amp;level=response</ModuleURI>
+  <Created>2026-07-08T03:17:04.884000Z</Created>
   <Network code="AV" startDate="1988-01-01T00:00:00.000000Z" restrictedStatus="open">
     <Description>Alaska Volcano Observatory (AVO)</Description>
     <Identifier type="DOI">10.7914/SN/AV
@@ -13206,12 +13206,12 @@
       </Channel>
       <Channel code="SHN" startDate="2016-07-11T00:00:00.000000Z" endDate="2023-08-25T18:30:00.000000Z" restrictedStatus="open" locationCode="">
         <Comment>
-          <Value>Reconfigure Logger for new Datastream Template</Value>
+          <Value>[LOGGER::Q330S::4178]</Value>
           <BeginEffectiveTime>2016-07-11T00:00:00.000000Z</BeginEffectiveTime>
           <EndEffectiveTime>2023-08-25T18:30:00.000000Z</EndEffectiveTime>
         </Comment>
         <Comment>
-          <Value>[LOGGER::Q330S::4178]</Value>
+          <Value>Reconfigure Logger for new Datastream Template</Value>
           <BeginEffectiveTime>2016-07-11T00:00:00.000000Z</BeginEffectiveTime>
           <EndEffectiveTime>2023-08-25T18:30:00.000000Z</EndEffectiveTime>
         </Comment>

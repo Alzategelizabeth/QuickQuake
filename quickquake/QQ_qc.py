@@ -476,32 +476,89 @@ def qc_one_event(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(10, 4))
+        # -------------------------
+        # Plot style, same as moveout reference
+        # -------------------------
+        figsize = (10, 7)
+        label_fontsize = 18
+        tick_fontsize = 20
+        title_fontsize = 17
+        legend_fontsize = 15
+
+        fig, ax = plt.subplots(figsize=figsize)
+
         ax.plot(v_grid, energies, "k-", lw=2)
 
         highlight_w = 0.15
         x0 = best_v - 0.5 * highlight_w
         x1 = best_v + 0.5 * highlight_w
+
         ax.axvspan(x0, x1, color="red", alpha=0.18, zorder=0)
         ax.axvline(best_v, color="red", lw=1.2, alpha=0.8)
 
-        ax.axhline(e_noise, color="tab:orange", lw=2.0, label=f"P{noise_percentile:.0f}={e_noise:.2e}")
-        ax.axhline(e_signal, color="tab:cyan", lw=2.0, label=f"P{signal_percentile:.0f}={e_signal:.2e}")
+        ax.axhline(
+            e_noise,
+            color="tab:orange",
+            lw=2.0,
+            label=f"P{noise_percentile:.0f}={e_noise:.2e}",
+        )
+
+        ax.axhline(
+            e_signal,
+            color="tab:cyan",
+            lw=2.0,
+            label=f"P{signal_percentile:.0f}={e_signal:.2e}",
+        )
 
         ax.set_title(
             f"event_id={eid} | {t0.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"P{signal_percentile:.0f}/P{noise_percentile:.0f}={ratio:.2f}"
+            f"P{signal_percentile:.0f}/P{noise_percentile:.0f}={ratio:.2f}",
+            fontsize=title_fontsize,
+            pad=12,
         )
-        ax.set_xlabel("Velocity (km/s)")
-        ax.set_ylabel("Stacked Energy")
-        ax.grid(ls="-", alpha=0.15)
-        ax.legend()
-        plt.tight_layout()
 
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        out_png = plot_dir / f"qc_event{eid}_{t0.strftime('%Y%m%dT%H%M%S')}.png"
-        fig.savefig(out_png, dpi=150)
-        plt.close(fig)
+        ax.set_xlabel("Velocity (km/s)", fontsize=label_fontsize, labelpad=10)
+        ax.set_ylabel("Stacked Energy", fontsize=label_fontsize, labelpad=10)
+
+        ax.tick_params(
+            axis="both",
+            which="major",
+            labelsize=tick_fontsize,
+            length=7,
+            width=1.4,
+        )
+
+    # Agranda el texto tipo 1e-5 / 1e-6 si aparece en el eje
+    ax.xaxis.offsetText.set_fontsize(tick_fontsize)
+    ax.yaxis.offsetText.set_fontsize(tick_fontsize)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+    ax.grid(ls="-", alpha=0.15)
+
+    leg = ax.legend(fontsize=legend_fontsize)
+    if leg is not None:
+        leg.get_frame().set_linewidth(0.8)
+
+    fig.subplots_adjust(
+        left=0.14,
+        right=0.97,
+        bottom=0.13,
+        top=0.90,
+    )
+
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    out_png = plot_dir / f"qc_event{eid}_{t0.strftime('%Y%m%dT%H%M%S')}.png"
+
+    fig.savefig(
+        out_png,
+        dpi=150,
+        bbox_inches="tight",
+        pad_inches=0.03,
+    )
+
+    plt.close(fig)
 
     return {
         "event_id": eid,

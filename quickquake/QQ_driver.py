@@ -17,7 +17,7 @@ import traceback
 # CONFIGURATION
 # 
 
-START = "2021-07-29T08:00:00"
+START = "2021-07-28T08:00:00"
 END   = "2021-07-30T00:00:00"
 HOUR_STEP = 8
 
@@ -26,7 +26,7 @@ DATA_ROOT = BASE_DIR / "data"
 MODEL_DIR = BASE_DIR / "dependencies/PhaseNet/model/190703-214543"
 
 
-RUN_CONFIG   =  True
+RUN_CONFIG   =  False
 
 # config options (user edits )
 center   = (-161.8903, 55.4133) # central cooordinates for your region of interest 
@@ -36,16 +36,16 @@ channels = "BHZ,BHN,BHE,SHZ,SHN,SHE"
 client   = "IRIS"
 region   = "pavlof"
 
-RUN_DL       = True
+RUN_DL       = False
 
-RUN_PHASENET = True
+RUN_PHASENET = False
 # phasenet options (user edits )
 phasenet_min_p_prob = 0.30
 phasenet_min_s_prob = 0.30
 phasenet_mpd        = 50  # minimum peak distance
 
 
-RUN_GAMMA    = True
+RUN_GAMMA    = False
 # gamma options (user edits )
 gamma_method           = "BGMM"   # default: BGMM
 gamma_oversample_factor = 30       # default: 30 for BGMM
@@ -56,7 +56,7 @@ gamma_max_sigma12      = 1     #covariance
 
 
 
-RUN_MERGE_GAMMA = True
+RUN_MERGE_GAMMA = False
 
 RUN_ARPICK = False                # Enable ar_pick repicking step
 
@@ -107,7 +107,7 @@ qc_signal_percentile = 90.0
 qc_min_ratio = 5.0 
 qc_energy_type = "squared_median" # other option is "envelope_median" or "squared_median"
 qc_make_plot = True
-qc_max_plots = 50 # Set to None to disable the limit
+qc_max_plots = 100 # Set to None to disable the limit
 
 # SCRIPTS 
 
