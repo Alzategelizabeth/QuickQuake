@@ -1,10 +1,13 @@
 # Changelog
 
-## v5.0 (2026-10-15)
+Versions stay 0.x until the first official release (1.0).
 
-With the default settings, results are the same as v4.6: on the Pavlof example
-(2021-07-29) the GaMMA catalog and picks, the HypoInverse and HypoDD catalogs and
-the QC catalogs are byte-identical to the ones from the v4.6 scripts.
+## v0.5 (2026-10-15)
+
+With the default settings, results are the same as the previous development code
+(commit b9f0e9c, "v4.6"): on the Pavlof example (2021-07-29) the GaMMA catalog and
+picks, the HypoInverse and HypoDD catalogs and the QC catalogs are byte-identical
+to the ones from those scripts.
 
 ### Driver (`quickquake/QQ_driver.py`)
 - Same layout: settings at the top (each `RUN_...` switch followed by the options of that step), then the code that runs each step.

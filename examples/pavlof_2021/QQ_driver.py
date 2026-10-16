@@ -7,7 +7,7 @@ This file is an ORCHESTRATOR only
 
 EXAMPLE: Pavlof Volcano, Alaska, 29 July 2021 (a small, dense volcano network).
 It uses the original box station search and GaMMA without DBSCAN, so it reproduces
-the results of QuickQuake v4.6.
+the results of the previous QuickQuake code (commit b9f0e9c).
 
 How to use it:
     1. Copy this file into a folder for your project (e.g. ~/research/my_region/).
