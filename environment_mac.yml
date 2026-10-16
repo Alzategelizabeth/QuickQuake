@@ -1,0 +1,24 @@
+name: QuickQuakeMac
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - obspy
+  - pyproj
+  - h5py
+  - pyyaml
+  - tqdm
+  - requests
+  - fsspec
+  - tensorflow=2.14.*
+  - keras=2.14.*
+  - tensorboard=2.14.*
+  - scikit-learn=1.2.2
+  - numba
+  - llvmlite

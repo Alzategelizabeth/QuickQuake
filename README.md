@@ -3,12 +3,9 @@
 
 ![plot1](/figs/QuickQuakeLogo.png)
 
-QuickQuake builds an earthquake catalog from public seismic data anywhere in the world. You edit one file, `QQ_driver.py`, and run it. QuickQuake then downloads the waveforms, picks P and S arrivals, groups them into events, locates and relocates the events, and checks their quality.
+This repository contains the Python scripts for wrapping up and streamlining the procedures and computer codes for earthquake detection and relocation. Some scripts are modified from QuakeFlow. For detailed description and usage of each individual package, please read the corresponding documentation.
 
-```
-For each time chunk:   stations ─► waveforms ─► PhaseNet picks ─► GaMMA events
-Then, once:            merge chunks ─► HypoInverse + HypoDD ─► quality control ─► final catalog
-```
+## Major earthquake detection packages used in this workflow.
 
 | Step | Program |
 |---|---|
@@ -18,34 +15,33 @@ Then, once:            merge chunks ─► HypoInverse + HypoDD ─► quality c
 | Location and relocation | HypoInverse and HypoDD, through [HypoXPy](https://github.com/xtyangpsp/HypoXPy) |
 | Quality control | QuickQuake energy-versus-velocity test |
 
-Parts of the download, picking and association scripts are modified from [QuakeFlow](https://github.com/AI4EPS/QuakeFlow); each modified script says so at the top.
+Parts of the download, picking and association scripts are modified from [QuakeFlow](https://github.com/AI4EPS/QuakeFlow ).
 
-## What is in this repository
+## This repository
 
 | Path | What it is |
 |---|---|
-| `quickquake/QQ_driver.py` | **The file you edit**: all settings at the top (each step's `RUN_...` switch followed by its options), then the code that runs each step |
-| `quickquake/` (other files) | The scripts of each step (see section 7); you do not need to edit them |
+| `quickquake/QQ_driver.py` | **The file you edit**: all settings at the top  |
+| `quickquake/` | The scripts of each step (see section 7)|
 | `examples/` | A ready-to-run driver: Pavlof Volcano (Alaska) |
 | `hypox_templates/` | Velocity models and HypoInverse/HypoDD parameter templates |
 | `dependencies/` | Source code of PhaseNet, GaMMA, HypoXPy and HypoInverse |
-| `install.sh` | The installer (run once) |
-| `environment.yml` | List of Python packages and versions that `install.sh` installs |
-| `README.md`, `CHANGELOG.md`, `LICENSE` | This guide, the list of changes, the license |
-| `.gitignore`, `.gitmodules`, `.vscode/` | Hidden files for git and VS Code (Finder shows them with Cmd + Shift + .) |
+| `install.sh` | The installer just run once|
+| `environment.yml` | List of Python packages and versions that `install.sh` needs |
+
 
 ## 1. Install
 
 You need [Miniforge](https://github.com/conda-forge/miniforge) (conda) and, for HypoInverse/HypoDD, a Fortran compiler (`gfortran`).
 
 ```bash
-git clone --recurse-submodules https://github.com/Alzategelizabeth/QuickQuake.git
+git clone --recurse-submodules https://github.com/xtyangpsp/QuickQuake.git
 cd QuickQuake
 bash install.sh            # creates the conda environment "quickquake"
 conda activate quickquake
 ```
 
-`install.sh` creates the environment from `environment.yml`, installs PhaseNet, GaMMA and HypoXPy from `dependencies/`, and checks whether the HypoInverse/HypoDD programs are in `~/bin`. It does not change your shell settings.
+`install.sh` creates the environment from `environment.yml`, installs PhaseNet, GaMMA and HypoXPy from `dependencies/`, and checks whether the HypoInverse/HypoDD programs are in `~/bin`.
 
 ### Installing HypoInverse and HypoDD
 
@@ -110,30 +106,24 @@ Inside the `data/` folder next to your driver:
 | `merged/output/GAMMA_hypoinv_good.csv` | HypoInverse locations that passed quality checks |
 | `merged/output/GAMMA_hypodd_catalog.csv` | HypoDD relocated catalog |
 | `merged/output/GAMMA_hypodd_catalog_qcfiltered.csv` | **Final catalog**: relocated events that passed QC |
-| `merged/output/..._qcrejected.csv`, `..._qcskipped.csv` | Events that failed QC, or could not be tested (with the reason) |
-| `merged/output/qc_plots_GAMMA/` | QC figures (`qc_max_plots` of them, 20 by default) |
+| `merged/output/..._qcrejected.csv`, `..._qcskipped.csv` | Events that failed QC, or could not be tested  |
+| `merged/output/qc_plots_GAMMA/` | QC figures  |
 
-## 5. Large networks and long periods
 
-Tested on West Greenland, with dozens of stations from many networks:
 
-- **GaMMA runs out of memory or never finishes.** Set `gamma_use_dbscan = True`. Picks are split into groups (DBSCAN) that are associated in parallel on several CPUs. The group size `gamma_dbscan_eps` matters: on the Pavlof example (34 events with DBSCAN off), `eps = 15` s found 33 of them in one sixth of the time, while `"auto"` (6.3 s, from the station spacing) found only 27. Before a long run, compare DBSCAN on and off on one chunk and choose `eps` from that test.
-- **Different sample rates and duplicate channels.** Use `station_search = "radius"`. It keeps one channel set per station, chosen from the data actually available.
-- **HypoDD fails with "This station is listed twice in station file".** HypoDD reads only 7 characters of a station name, so `3Z.SK12G` and `3Z.SK12S` look identical. Set `location_combine_net_sta = "auto"`.
-
-## 6. Troubleshooting
+## 5. Troubleshooting
 
 | Message | Fix |
 |---|---|
 | `QuickQuake was not found` | Set `QUICKQUAKE_DIR` at the top of your driver |
 | Location step: `hyp1.40` not found | Compile HypoInverse/HypoDD (section 1) or set `location_binpath` |
 | `[SKIP] GaMMA: picks.csv does not exist` | No data or no picks in that chunk; check the chunk's download output in the log |
-| GaMMA is very slow or crashes | `gamma_use_dbscan = True` (section 5) |
-| `Missing P velocity model` | Check `location_p_model` / `location_s_model` (a file in `hypox_templates/` or a full path) |
+| GaMMA is very slow | `gamma_use_dbscan = True` (section 5) |
 
-## 7. Scripts and notebooks
 
-You only run `QQ_driver.py`; it calls the scripts below in order. Each one can also run on its own (`--help` lists its options).
+## 6. Scripts and notebooks
+
+You only run `QQ_driver.py`; it calls the scripts below in order.
 
 | File | Step |
 |---|---|
