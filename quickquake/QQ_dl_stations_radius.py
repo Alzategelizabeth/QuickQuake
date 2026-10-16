@@ -30,6 +30,7 @@ from obspy.clients.fdsn.header import FDSNNoDataException
 # ============================================================
 
 EXCLUDED_NETWORKS = {"SY"}
+EXCLUDED_STATIONS = set()   # stations to skip, written as "NET.STA" (e.g. "DK.ILULI")
 MIN_SAMPLE_RATE = 20.0
 
 VALID_COMPONENTS = {"E", "N", "Z", "1", "2", "3"}
@@ -151,6 +152,7 @@ def filter_inventory(inventory):
             station
             for station in network.stations
             if station.channels
+            and f"{network.code}.{station.code}" not in EXCLUDED_STATIONS
         ]
 
     output.networks = [
@@ -502,6 +504,7 @@ def download_stations(
     print(
         f"[stations] Hard filters: "
         f"network not in {sorted(EXCLUDED_NETWORKS)}, "
+        f"station not in {sorted(EXCLUDED_STATIONS)}, "
         f"sample_rate >= {MIN_SAMPLE_RATE} Hz, "
         f"components={sorted(VALID_COMPONENTS)}"
     )
@@ -652,6 +655,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--excluded_stations",
+        default="",
+        help='Comma-separated stations to skip, as NET.STA (e.g. "DK.ILULI,3Z.SK12G"; default: none)',
+    )
+
+    parser.add_argument(
         "--min_sample_rate",
         type=float,
         default=MIN_SAMPLE_RATE,
@@ -667,6 +676,7 @@ if __name__ == "__main__":
 
     # Command-line options override the module defaults
     EXCLUDED_NETWORKS = {code.strip() for code in args.excluded_networks.split(",") if code.strip()}
+    EXCLUDED_STATIONS = {code.strip() for code in args.excluded_stations.split(",") if code.strip()}
     MIN_SAMPLE_RATE = float(args.min_sample_rate)
 
     download_stations(

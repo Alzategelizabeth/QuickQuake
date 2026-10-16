@@ -16,3 +16,6 @@ __pycache__/
 # System files and archives
 .DS_Store
 *.tar
+
+# Code maps made by graphify
+graphify-out/

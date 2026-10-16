@@ -86,8 +86,9 @@ The settings you will change most often:
 |---|---|
 | `START`, `END`, `HOUR_STEP` | Period to process (UTC) and length of each processing chunk (hours) |
 | `RUN_...` | Turn each step on or off, e.g. rerun only `RUN_LOCATION` and `RUN_QC`; the options of each step are listed right below its switch |
-| `center`, `deg` | `(longitude, latitude)` of the area and the size of the box around it |
-| `station_search` | `"radius"` (default): every seismic station within `station_maxradius`, best channel set chosen from the data. `"box"`: listed `networks`/`channels` inside the box (original method, used by the Pavlof example) |
+| `center`, `deg` | `(longitude, latitude)` of the area, and the width (degrees) of the box around it where GaMMA searches for events |
+| `station_maxradius` | Every seismic station of every network within this distance (degrees) of `center` is used; the best channel set of each station is chosen from the data actually available |
+| `station_excluded_networks`, `station_excluded_stations` | Networks (e.g. `"SY"`, synthetic data) and stations (as `"NET.STA"`, e.g. `"DK.ILULI"`) to leave out |
 | `gamma_use_dbscan` | `False` (default): one job on one CPU (original). `True`: DBSCAN groups on several CPUs (`gamma_ncpu`), much faster; choose `gamma_dbscan_eps` by comparing DBSCAN on and off on one chunk (see the comments in `QQ_driver.py`) |
 | `location_p_model`, `location_s_model` | Velocity models: a file in `hypox_templates/` or a path to your own `.cre` file |
 | `location_ref_ele` | Reference elevation for HypoInverse (highest station or topography, km) |
@@ -129,8 +130,7 @@ You only run `QQ_driver.py`; it calls the scripts below in order.
 | File | Step |
 |---|---|
 | `QQ_config.py` | Writes `config.json` for one time chunk |
-| `QQ_dl_stations.py`, `QQ_dl_data.py` | Box search: stations and waveforms of the listed networks/channels |
-| `QQ_dl_stations_radius.py`, `QQ_dl_data_radius.py` | Radius search: all seismic stations; best channel set chosen from the data |
+| `QQ_dl_stations_radius.py`, `QQ_dl_data_radius.py` | Stations within `station_maxradius` (all networks) and their waveforms; best channel set of each station chosen from the data; backup data centers when the EarthScope federator has no data |
 | `QQ_predict.py` | PhaseNet P/S picking |
 | `QQ_gamma.py` | GaMMA association (optional DBSCAN + several CPUs) |
 | `QQ_merge_gamma_outputs.py` | Combines all chunks into `merged/` |

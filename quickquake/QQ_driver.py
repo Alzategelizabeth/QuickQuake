@@ -39,27 +39,25 @@ RUN_CONFIG   =  True
 
 # config options (user edits )
 center   = (-161.8903, 55.4133) # central cooordinates for your region of interest 
-deg      = 1.0
-networks = ["AV"]                     # box search only (radius search uses every network)
-channels = "BHZ,BHN,BHE,SHZ,SHN,SHE"  # box search only (radius search picks the channels itself)
-client   = "IRIS"                      # FDSN data center; "EARTHSCOPE_FEDERATOR" asks all data centers
-                                       # and adds the backup centers below (best for radius search)
+deg      = 1.0                   # width (degrees) of the box around center where GaMMA searches for events
+client   = "EARTHSCOPE_FEDERATOR"  # FDSN data center; "EARTHSCOPE_FEDERATOR" asks all data centers and adds
+                                   # the backup centers below; a single center (e.g. "IRIS") also works
 region   = "pavlof"
 
 RUN_DL       = True
 # download options (user edits )
-station_search = "radius"            # "box": networks/channels above, inside the region box (original method)
-                                     # "radius": every seismic station within station_maxradius; the best
-                                     #           channel set of each station is chosen from the real data
-station_maxradius = 2.0              # radius search: degrees around center
-station_excluded_networks = ["SY"]   # radius search: networks to skip (SY = synthetic data)
-station_min_sample_rate = 20.0       # radius search: ignore channels sampled below this rate (Hz)
-station_target_rate = 100.0          # radius search: preferred sample rate when ranking channels (Hz)
-station_min_coverage = 0.8           # radius search: minimum fraction of the chunk with data
-download_max_retries = None          # attempts after a download error (None = box 10, radius 3)
-download_retry_sleep = None          # seconds between attempts (None = box 5, radius 3)
-download_fallback_clients = ["EARTHSCOPE", "GEOFON", "ETH"]  # radius search: backup data centers tried in
-                                     # order when the federator has no data (GEOFON serves DK.GDH, ETH DK.KARAT)
+# Every seismic station of every network within station_maxradius of center is used;
+# the best channel set of each station is chosen from the data actually available.
+station_maxradius = 2.0              # degrees around center
+station_excluded_networks = ["SY"]   # networks to skip (SY = synthetic data)
+station_excluded_stations = []       # stations to skip, as "NET.STA", e.g. ["DK.ILULI", "3Z.SK12G"]
+station_min_sample_rate = 20.0       # ignore channels sampled below this rate (Hz)
+station_target_rate = 100.0          # preferred sample rate when ranking channels (Hz)
+station_min_coverage = 0.8           # minimum fraction of the chunk with data
+download_max_retries = 3             # attempts after a download error
+download_retry_sleep = 3             # seconds between attempts
+download_fallback_clients = ["EARTHSCOPE", "GEOFON", "ETH"]  # backup data centers tried in order when the
+                                     # federator has no data (GEOFON serves DK.GDH, ETH DK.KARAT)
 
 RUN_PHASENET = True
 # phasenet options (user edits )
@@ -168,10 +166,8 @@ qc_max_events = 0            # test only the first N events (0 = all)
 
 SCRIPTS = {
     "config":      BASE_DIR / "quickquake/QQ_config.py",
-    "stations":    BASE_DIR / "quickquake/QQ_dl_stations.py",
-    "download":    BASE_DIR / "quickquake/QQ_dl_data.py",
-    "stations_radius": BASE_DIR / "quickquake/QQ_dl_stations_radius.py",
-    "download_radius": BASE_DIR / "quickquake/QQ_dl_data_radius.py",
+    "stations":    BASE_DIR / "quickquake/QQ_dl_stations_radius.py",
+    "download":    BASE_DIR / "quickquake/QQ_dl_data_radius.py",
     "phasenet":    BASE_DIR / "quickquake/QQ_predict.py",
     "gamma":       BASE_DIR / "quickquake/QQ_gamma.py",
     "merge":       BASE_DIR / "quickquake/QQ_merge_gamma_outputs.py",
@@ -200,44 +196,28 @@ def process_window(start, end, out_dir: Path):
     stations = out_dir / "stations.json"
     picks    = out_dir / "picks.csv"
 
-    # Download commands: box search (original) or radius search
-    retries = []
-    if download_max_retries is not None:
-        retries += ["--max_retries", str(download_max_retries)]
-    if download_retry_sleep is not None:
-        retries += ["--retry_sleep_s", str(download_retry_sleep)]
-
-    if station_search == "radius":
-        stations_cmd = [
-            sys.executable, str(SCRIPTS["stations_radius"]),
-            "--config", str(config),
-            "--output_dir", str(out_dir),
-            "--maxradius", str(station_maxradius),
-            "--excluded_networks", ",".join(station_excluded_networks),
-            "--min_sample_rate", str(station_min_sample_rate),
-            "--plot"
-        ]
-        download_cmd = [
-            sys.executable, str(SCRIPTS["download_radius"]),
-            "--config", str(config),
-            "--output_dir", str(out_dir),
-            "--target_rate", str(station_target_rate),
-            "--min_sample_rate", str(station_min_sample_rate),
-            "--min_coverage", str(station_min_coverage),
-            "--fallback_clients", ",".join(download_fallback_clients),
-        ] + retries
-    else:
-        stations_cmd = [
-            sys.executable, str(SCRIPTS["stations"]),
-            "--config", str(config),
-            "--output_dir", str(out_dir),
-            "--plot"
-        ]
-        download_cmd = [
-            sys.executable, str(SCRIPTS["download"]),
-            "--config", str(config),
-            "--output_dir", str(out_dir)
-        ] + retries
+    # Download commands: stations within station_maxradius, then their waveforms
+    stations_cmd = [
+        sys.executable, str(SCRIPTS["stations"]),
+        "--config", str(config),
+        "--output_dir", str(out_dir),
+        "--maxradius", str(station_maxradius),
+        "--excluded_networks", ",".join(station_excluded_networks),
+        "--excluded_stations", ",".join(station_excluded_stations),
+        "--min_sample_rate", str(station_min_sample_rate),
+        "--plot"
+    ]
+    download_cmd = [
+        sys.executable, str(SCRIPTS["download"]),
+        "--config", str(config),
+        "--output_dir", str(out_dir),
+        "--target_rate", str(station_target_rate),
+        "--min_sample_rate", str(station_min_sample_rate),
+        "--min_coverage", str(station_min_coverage),
+        "--fallback_clients", ",".join(download_fallback_clients),
+        "--max_retries", str(download_max_retries),
+        "--retry_sleep_s", str(download_retry_sleep),
+    ]
 
     # GaMMA options that are added only when used
     gamma_extra = []
@@ -258,8 +238,8 @@ def process_window(start, end, out_dir: Path):
             "--output", str(config),
             "--center=" + f"{center[0]},{center[1]}",
             "--deg", str(deg),
-            "--networks", ",".join(networks),
-            "--channels", channels,
+            "--networks", "*",      # all networks and channels: the station search
+            "--channels", "*",      # chooses them (see download options)
             "--client", client,
             "--region", region
         ], "Config"),
