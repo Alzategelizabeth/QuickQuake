@@ -83,7 +83,7 @@ gamma_vp               = 6.0    # P velocity of GaMMA's uniform model (km/s)
 gamma_vp_vs_ratio      = 1.73   # Vp/Vs of GaMMA's uniform model
 gamma_depth_min_km     = 0      # shallowest event depth searched (km)
 gamma_depth_max_km     = 60     # deepest event depth searched (km)
-gamma_use_dbscan       = False  # False = all picks of a chunk in one job on 1 CPU (original method)
+gamma_use_dbscan       = True   # False = all picks of a chunk in one job on 1 CPU (original method)
                                 # True  = split picks into groups (DBSCAN) and associate them on several
                                 #         CPUs; use it for many stations or chunks longer than ~1 hour
 gamma_dbscan_eps       = "auto" # DBSCAN group size in seconds, or "auto" (from station spacing)

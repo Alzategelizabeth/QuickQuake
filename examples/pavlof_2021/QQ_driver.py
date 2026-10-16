@@ -38,7 +38,7 @@ DATA_ROOT = Path(__file__).resolve().parent / "data"      # results, next to thi
 MODEL_DIR = BASE_DIR / "dependencies/PhaseNet/model/190703-214543"
 
 
-RUN_CONFIG   =  True
+RUN_CONFIG   =  False
 
 # config options (user edits )
 center   = (-161.8903, 55.4133) # central cooordinates for your region of interest 
@@ -47,7 +47,7 @@ client   = "EARTHSCOPE_FEDERATOR"  # FDSN data center; "EARTHSCOPE_FEDERATOR" as
                                    # the backup centers below; a single center (e.g. "IRIS") also works
 region   = "pavlof"
 
-RUN_DL       = True
+RUN_DL       = False
 # download options (user edits )
 # Every seismic station of every network within station_maxradius of center is used;
 # the best channel set of each station is chosen from the data actually available.
@@ -62,7 +62,7 @@ download_retry_sleep = 3             # seconds between attempts
 download_fallback_clients = ["EARTHSCOPE", "GEOFON", "ETH"]  # backup data centers tried in order when the
                                      # federator has no data (GEOFON serves DK.GDH, ETH DK.KARAT)
 
-RUN_PHASENET = True
+RUN_PHASENET = False
 # phasenet options (user edits )
 phasenet_min_p_prob = 0.30
 phasenet_min_s_prob = 0.30
@@ -86,7 +86,7 @@ gamma_vp               = 6.0    # P velocity of GaMMA's uniform model (km/s)
 gamma_vp_vs_ratio      = 1.73   # Vp/Vs of GaMMA's uniform model
 gamma_depth_min_km     = 0      # shallowest event depth searched (km)
 gamma_depth_max_km     = 60     # deepest event depth searched (km)
-gamma_use_dbscan       = False  # False = all picks of a chunk in one job on 1 CPU (original method)
+gamma_use_dbscan       = True   # False = all picks of a chunk in one job on 1 CPU (original method)
                                 # True  = split picks into groups (DBSCAN) and associate them on several
                                 #         CPUs; use it for many stations or chunks longer than ~1 hour
 gamma_dbscan_eps       = "auto" # DBSCAN group size in seconds, or "auto" (from station spacing)
