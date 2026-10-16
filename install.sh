@@ -1,56 +1,72 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
 # =================================================================
-# COMPLETE INSTALLATION OF QuickQuake 
+# QuickQuake installation (macOS and Linux)
+#
+#   bash install.sh [environment-name]        (default name: quickquake)
+#
+# Steps:
+#   1. create the conda environment from environment.yml
+#   2. download HypoXPy (git submodule) if the folder is empty
+#   3. install PhaseNet, GaMMA and HypoXPy from dependencies/
+#   4. check that hyp1.40, hypoDD and ph2dt are available
+#
+# It never edits your shell configuration files (~/.bashrc, ~/.zshrc).
+# Set QQ_BIN_DIR to check another folder than ~/bin in step 4.
 # =================================================================
+set -euo pipefail
 
-# 1. Create a Conda environment from environment.yml
-echo "Creating QuickQuake environment..."
-conda env create -f environment.yml || {
-    echo "failed to create the environment. Check environment.yml";
-    exit 1;
-}
+ENV_NAME="${1:-quickquake}"
+BIN_DIR="${QQ_BIN_DIR:-$HOME/bin}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR"
 
-# 2. Activate the environment 
-echo "Activating environment..."
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate QuickQuake || {
-    echo "Could not activate the environment. Is it installed?";
-    exit 1;
-}
+if command -v mamba >/dev/null 2>&1; then
+    CONDA=mamba
+elif command -v conda >/dev/null 2>&1; then
+    CONDA=conda
+else
+    echo "conda was not found. Install Miniforge first: https://github.com/conda-forge/miniforge"
+    exit 1
+fi
 
-# 3. Install local packages in editable mode
-echo "Installing PhaseNet and Gamma..."
-pip install -e dependencies/PhaseNet || {
-    echo " Failed to install PhaseNet. Check the dependencies/PhaseNet folder";
-    exit 1;
-}
+echo "==> 1/4 Conda environment '$ENV_NAME'"
+if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+    echo "    already exists, not recreated (remove it with: conda env remove -n $ENV_NAME)"
+else
+    "$CONDA" env create -n "$ENV_NAME" -f environment.yml
+fi
 
-pip install -e dependencies/GaMMA || {
-    echo "Failed to install Gamma. Check the dependencies/GaMMA folder";
-    exit 1;
-}
+echo "==> 2/4 HypoXPy source"
+if [ ! -f dependencies/HypoXPy/setup.py ]; then
+    git submodule update --init dependencies/HypoXPy
+fi
 
-# 4. Set permissions for scripts
-echo "Setting permissions..."
-chmod +x quickquake/*.py
+echo "==> 3/4 Installing PhaseNet, GaMMA and HypoXPy into '$ENV_NAME'"
+conda run -n "$ENV_NAME" python -m pip install -e dependencies/PhaseNet -e dependencies/GaMMA
+conda run -n "$ENV_NAME" python -m pip install dependencies/HypoXPy
 
-# 5. Configure environment variables (hypoinverse should be already compiled)
-echo "Configuring environment variables..."
-cat <<EOT >> ~/.bashrc
-# QuickQuake configuration
-export QUICKQUAKE_ROOT="$(pwd)"
-export PATH="$(pwd)/quickquake:\$PATH"
-export HYPO_BIN="$(pwd)/dependencies/hyp1.40/source/hyp1.40"
-EOT
+echo "==> 4/4 HypoInverse and HypoDD programs in $BIN_DIR"
+missing=0
+for program in hyp1.40 hypoDD ph2dt; do
+    if [ -x "$BIN_DIR/$program" ]; then
+        echo "    found    $BIN_DIR/$program"
+    else
+        echo "    MISSING  $BIN_DIR/$program"
+        missing=1
+    fi
+done
 
-source ~/.bashrc
-
-# 6. Final verification
 echo ""
 echo "================================================================"
-echo "Installation complete. Verify with:"
-echo "  \$ conda activate QuickQuake"
-echo "  \$ ls -l \$HYPO_BIN  # It should display the executable"
+if [ "$missing" -eq 0 ]; then
+    echo "Installation complete. Try the example project:"
+else
+    echo "Python part installed. Before running the location step, compile the"
+    echo "missing programs (README: 'Installing HypoInverse and HypoDD') and put"
+    echo "them in $BIN_DIR, or set location_binpath in your QQ_driver.py to their folder."
+    echo ""
+    echo "Then try the example project:"
+fi
+echo "  conda activate $ENV_NAME"
+echo "  python examples/pavlof_2021/QQ_driver.py"
 echo "================================================================"
-

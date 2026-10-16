@@ -1,34 +1,40 @@
-name: QuickQuake
+# QuickQuake conda environment.
+# Versions below are the ones tested with this workflow (macOS and Linux, CPU only).
+#
+#   conda env create -f environment.yml      (or: mamba env create -f environment.yml)
+#
+# install.sh runs this for you and then installs PhaseNet, GaMMA and HypoXPy
+# from the dependencies/ folder.
+name: quickquake
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python=3.10
   - pip
 
-  # Core científico
-  - numpy=1.25.*
+  # Scientific core
+  - numpy=1.26
   - scipy
   - pandas
   - matplotlib
-  - scikit-learn
-  - obspy=1.4.0
+  - scikit-learn=1.2.2      # GaMMA's Gaussian mixture code requires this version
+  - obspy=1.5
   - pyproj
   - h5py
   - pyyaml
   - tqdm
   - requests
   - fsspec
+  - numba
 
   # PhaseNet (CPU)
-  - tensorflow=2.14.*=*cpu*
-  - tensorboard=2.14.*
+  - tensorflow=2.14
+  - keras=2.14
 
-  # Pip: SOLO lo imprescindible (sin seisgo/seisbench)
-  - pip:
-      - hypoinvpy==0.7.0
-      - hypoxpy==0.1.0
-      - pyasdf==0.8.1
-      - pycwt==0.4.0b0
-      - kneed==0.8.5
-      - plotly==6.0.1
+  # Notebooks and maps (visualization.ipynb, qc_inspection.ipynb, FI.ipynb)
+  - jupyterlab
+  - ipykernel
+  - cartopy
+  # Optional, only for the 3D topography plots in qq_helpers.py:
+  # - pygmt
+  # - plotly
