@@ -4,7 +4,8 @@ Versions stay 0.x until the first official release (1.0).
 
 ## Unreleased
 
-- Download: the radius search is now the only method. `QQ_dl_stations.py` and `QQ_dl_data.py` (box search with fixed networks and channels) were removed, and so were the driver options `station_search`, `networks` and `channels`. The default data center is `EARTHSCOPE_FEDERATOR`.
+- Download: the radius search is now the only method. The box-search scripts `QQ_dl_stations.py` and `QQ_dl_data.py` (fixed networks and channels) were removed, and so were the driver options `station_search`, `networks` and `channels`. The default data center is `EARTHSCOPE_FEDERATOR`.
+- The radius-search scripts `QQ_dl_stations_radius.py` and `QQ_dl_data_radius.py` were renamed to `QQ_dl_stations.py` and `QQ_dl_data.py`, since they are now the only download scripts.
 - New driver option `station_excluded_stations`: stations to leave out, as `"NET.STA"`.
 - `examples/pavlof_2021/`: radius search within 0.6 degrees of the volcano (the AV network is within 0.51 degrees).
 - README: HypoInverse is compiled from HypoXPy (`dependencies/HypoXPy/external/hypoinverse1.40`), whose makefile has the compiler options this old Fortran code needs; added the macOS fix for `ld: library 'System' not found`.

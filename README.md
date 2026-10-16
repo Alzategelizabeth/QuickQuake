@@ -130,7 +130,7 @@ You only run `QQ_driver.py`; it calls the scripts below in order.
 | File | Step |
 |---|---|
 | `QQ_config.py` | Writes `config.json` for one time chunk |
-| `QQ_dl_stations_radius.py`, `QQ_dl_data_radius.py` | Stations within `station_maxradius` (all networks) and their waveforms; best channel set of each station chosen from the data; backup data centers when the EarthScope federator has no data |
+| `QQ_dl_stations.py`, `QQ_dl_data.py` | Stations within `station_maxradius` (all networks) and their waveforms; best channel set of each station chosen from the data; backup data centers when the EarthScope federator has no data |
 | `QQ_predict.py` | PhaseNet P/S picking |
 | `QQ_gamma.py` | GaMMA association (optional DBSCAN + several CPUs) |
 | `QQ_merge_gamma_outputs.py` | Combines all chunks into `merged/` |

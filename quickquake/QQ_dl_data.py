@@ -3,7 +3,7 @@
 Download and select waveform data for QuickQuake.
 
 Design:
-- process every physical station discovered by QQ_dl_stations_radius.py
+- process every physical station discovered by QQ_dl_stations.py
 - candidate channels were already filtered to seismic data >= 20 Hz
 - rank candidate families before waveform download
 - try only the best family first
@@ -289,7 +289,7 @@ def rate_score(rate):
       3) 20-99 Hz, highest rate first
 
     1 Hz / 0.1 Hz channels never arrive here because
-    QQ_dl_stations_radius.py already removed them.
+    QQ_dl_stations.py already removed them.
     """
     rate = float(rate)
 

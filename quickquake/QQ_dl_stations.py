@@ -10,7 +10,7 @@ Design:
 - exclude low-sample-rate channels before waveform download
 - keep only seismic/ground-motion channel families and PhaseNet-compatible components
 - DO NOT choose the final channel family here
-- final waveform verification and family selection happen in QQ_dl_data_radius.py
+- final waveform verification and family selection happen in QQ_dl_data.py
 """
 
 import os
@@ -263,7 +263,7 @@ def build_candidate_json(inventory):
     Candidate metadata only.
 
     Response information is intentionally not required here.
-    QQ_dl_data_radius.py fetches response metadata only after a waveform
+    QQ_dl_data.py fetches response metadata only after a waveform
     family has actually passed the waveform/coverage test.
     """
     output = {}
@@ -539,7 +539,7 @@ def download_stations(
         stations
     )
 
-    # Candidate inventory used by QQ_dl_data_radius.py.
+    # Candidate inventory used by QQ_dl_data.py.
     stations.write(
         os.path.join(
             output_dir,

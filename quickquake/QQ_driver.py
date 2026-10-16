@@ -166,8 +166,8 @@ qc_max_events = 0            # test only the first N events (0 = all)
 
 SCRIPTS = {
     "config":      BASE_DIR / "quickquake/QQ_config.py",
-    "stations":    BASE_DIR / "quickquake/QQ_dl_stations_radius.py",
-    "download":    BASE_DIR / "quickquake/QQ_dl_data_radius.py",
+    "stations":    BASE_DIR / "quickquake/QQ_dl_stations.py",
+    "download":    BASE_DIR / "quickquake/QQ_dl_data.py",
     "phasenet":    BASE_DIR / "quickquake/QQ_predict.py",
     "gamma":       BASE_DIR / "quickquake/QQ_gamma.py",
     "merge":       BASE_DIR / "quickquake/QQ_merge_gamma_outputs.py",
