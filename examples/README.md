@@ -1,1 +1,0 @@
-This folder contains example scripts to run the package.
