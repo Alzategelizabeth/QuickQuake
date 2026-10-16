@@ -2,6 +2,12 @@
 
 Versions stay 0.x until the first official release (1.0).
 
+## Unreleased
+
+- README: HypoInverse is compiled from HypoXPy (`dependencies/HypoXPy/external/hypoinverse1.40`), whose makefile has the compiler options this old Fortran code needs; added the macOS fix for `ld: library 'System' not found`.
+- Removed `dependencies/hyp1.40`: a second copy of the HypoInverse source with a makefile without those options (on the Pavlof example its HypoInverse catalog had 56 instead of 57 good locations), plus 47 compiled `.o` files.
+- Added `environment_mac.yml` (conda environment used on macOS).
+
 ## v0.5 (2026-10-15)
 
 With the default settings, results are the same as the previous development code
