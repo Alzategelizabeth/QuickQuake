@@ -1,11 +1,17 @@
+#!/usr/bin/env python3
+"""
+Merge the stations.xml files of every chunk folder into one de-duplicated StationXML,
+<data_root>/merged/input/stations_merged.xml (input of the Frequency Index notebook).
+
+Usage:
+    python QQ_merge_stationxml.py --data_root /path/to/project/data
+"""
+
+import argparse
 from pathlib import Path
 from copy import deepcopy
 from obspy import read_inventory, Inventory
 from obspy.core.inventory import Network, Station
-
-
-DATA_DIR = Path("/home/elizabeth/soft/src/QuickQuake/data")
-OUTPUT_XML = DATA_DIR / "merged" / "input" / "stations_merged.xml"
 
 
 def is_chunk_folder(path: Path) -> bool:
@@ -140,19 +146,29 @@ def summarize_inventory(inv):
 
 
 def main():
-    OUTPUT_XML.parent.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description="Merge per-chunk stations.xml files into one StationXML")
+    parser.add_argument("--data_root", required=True,
+                        help="Project data folder that contains the chunk folders and merged/")
+    parser.add_argument("--output", default=None,
+                        help="Output file (default: <data_root>/merged/input/stations_merged.xml)")
+    args = parser.parse_args()
 
-    xml_files = collect_stationxml_files(DATA_DIR)
+    data_dir = Path(args.data_root).expanduser().resolve()
+    output_xml = (Path(args.output).expanduser() if args.output
+                  else data_dir / "merged" / "input" / "stations_merged.xml")
+    output_xml.parent.mkdir(parents=True, exist_ok=True)
+
+    xml_files = collect_stationxml_files(data_dir)
     print(f"Found {len(xml_files)} StationXML files")
 
     if not xml_files:
-        raise FileNotFoundError(f"No stations.xml files found in {DATA_DIR}")
+        raise FileNotFoundError(f"No stations.xml files found in {data_dir}")
 
     merged_inv = merge_inventories_dedup(xml_files)
     summarize_inventory(merged_inv)
 
-    print(f"\nWriting merged StationXML to: {OUTPUT_XML}")
-    merged_inv.write(str(OUTPUT_XML), format="STATIONXML")
+    print(f"\nWriting merged StationXML to: {output_xml}")
+    merged_inv.write(str(output_xml), format="STATIONXML")
     print("Done.")
 
 
