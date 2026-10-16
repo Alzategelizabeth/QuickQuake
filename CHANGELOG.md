@@ -34,6 +34,11 @@ the QC catalogs are byte-identical to the ones from the v4.6 scripts.
 - `QQ_merge_stationxml.py` takes `--data_root` instead of a fixed path.
 - Plot titles in `qq_helpers.py` take a `region_name` instead of "Pavlof"; each seismic network has a fixed colour in maps.
 
+### Figures
+- QC figures: larger figure and text (10 x 7 in), thicker axes and ticks.
+- `qq_helpers.plot_event_moveout_pretty`: moveout figure with control of figure size, text sizes, tick spacing and line widths, and optional saving; `visualization.ipynb` uses it.
+- New notebook `catalog_visualization_clean.ipynb`: publication figures of the final catalog, saved in `data/images/` of the project.
+
 ### Language and documentation
 - All comments, messages and notebooks are in English. `visualizacion.ipynb` is now `visualization.ipynb`, and `qc copy.ipynb` is now `qc_inspection.ipynb`.
 - Notebooks have a few lines at the top for the project's data folder instead of absolute paths; their stored outputs were cleared.

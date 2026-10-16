@@ -4396,6 +4396,221 @@ def plot_event_spectrograms_vertical_picks_only(
     return fig, axes, meta
 
 
+# ============================================================
+# MOVEOUT FIGURE FOR PUBLICATION (larger text, custom ticks)
+# ============================================================
+
+def plot_event_moveout_pretty(
+    row_event,
+    picks,
+    stations,
+    cache,
+    wf_index,
+    *,
+    # waveform window (seconds before / after origin time)
+    pre_s=5,
+    post_s=40,
+    min_prob=None,
+
+    # bandpass filter (Hz)
+    freqmin=1.0,
+    freqmax=5.0,
+    corners=4,
+    zerophase=True,
+
+    # figure size (inches)
+    figsize=(13, 7),
+
+    # vertical spacing and wiggle amplitude
+    wiggle_frac_of_spacing=1.5,
+    y_pad_km=2.0,
+    y_tick_step_km=None,
+
+    # picks
+    p_color="black",
+    s_color="red",
+    p_style="vline",
+    s_style="vline",
+    line_height_km=2.2,
+    line_width=1.8,
+    marker_size=5.0,
+
+    # text sizes
+    label_fontsize=20,
+    tick_fontsize=17,
+    title_fontsize=17,
+    legend_fontsize=15,
+
+    # x-axis ticks
+    x_tick_seconds=10,
+    x_tick_rotation=0,
+
+    # axis and tick line widths
+    tick_length=7,
+    tick_width=1.4,
+    spine_width=1.2,
+
+    # margins (fractions of the figure)
+    left=0.11,
+    right=0.98,
+    bottom=0.14,
+    top=0.90,
+
+    # optional saving
+    save_path=None,
+    save_format=None,
+    dpi=400,
+):
+    """
+    Wrapper around plot_event_moveout_picks_only with control of:
+      - figure size
+      - font sizes
+      - vertical spacing
+      - x/y tick spacing
+      - pick and axis line widths
+      - optional saving (format taken from the save_path extension)
+
+    Returns:
+      fig, ax, meta
+    """
+
+    import numpy as np
+    import matplotlib.dates as mdates
+    import matplotlib.ticker as mticker
+    from pathlib import Path
+
+    fig, ax, meta = plot_event_moveout_picks_only(
+        row_event=row_event,
+        picks=picks,
+        stations=stations,
+        cache=cache,
+        wf_index=wf_index,
+
+        pre_s=pre_s,
+        post_s=post_s,
+        min_prob=min_prob,
+
+        freqmin=freqmin,
+        freqmax=freqmax,
+        corners=corners,
+        zerophase=zerophase,
+
+        p_style=p_style,
+        s_style=s_style,
+        p_color=p_color,
+        s_color=s_color,
+        marker_size=marker_size,
+        line_width=line_width,
+        line_height_km=line_height_km,
+
+        wiggle_frac_of_spacing=wiggle_frac_of_spacing,
+        y_pad_km=y_pad_km,
+
+        figsize=figsize,
+        save_png=None,
+    )
+
+    if fig is None or ax is None:
+        return fig, ax, meta
+
+    # -------------------------
+    # Labels and title
+    # -------------------------
+    ax.set_xlabel("Time", fontsize=label_fontsize, labelpad=10)
+    ax.set_ylabel("Distance (km)", fontsize=label_fontsize, labelpad=10)
+    catc = CatalogCols()
+
+    event_time = pd.to_datetime(row_event[catc.time], utc=True, errors="coerce")
+
+    if pd.notna(event_time):
+        event_time_str = event_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+    else:
+        event_time_str = str(row_event[catc.time])
+
+    eid = row_event.get(catc.event_id, "")
+
+    ax.set_title(
+        f"event_id={eid} | {event_time_str}",
+        fontsize=title_fontsize,
+        pad=12,
+    )
+
+    # -------------------------
+    # Ticks
+    # -------------------------
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=tick_fontsize,
+        length=tick_length,
+        width=tick_width,
+    )
+
+    ax.tick_params(axis="x", labelrotation=x_tick_rotation)
+
+    # x-axis tick spacing in seconds
+    if x_tick_seconds is not None:
+        ax.xaxis.set_major_locator(
+            mdates.SecondLocator(interval=int(x_tick_seconds))
+        )
+        ax.xaxis.set_major_formatter(
+            mdates.DateFormatter("%H:%M:%S")
+        )
+
+    # y-axis tick spacing in km
+    if y_tick_step_km is not None:
+        ax.yaxis.set_major_locator(
+            mticker.MultipleLocator(float(y_tick_step_km))
+        )
+
+    # -------------------------
+    # Frame (spine) width
+    # -------------------------
+    for spine in ax.spines.values():
+        spine.set_linewidth(spine_width)
+
+    # -------------------------
+    # Legend
+    # -------------------------
+    leg = ax.get_legend()
+    if leg is not None:
+        for txt in leg.get_texts():
+            txt.set_fontsize(legend_fontsize)
+        leg.get_frame().set_linewidth(0.8)
+
+    # -------------------------
+    # Margins
+    # -------------------------
+    fig.subplots_adjust(
+        left=left,
+        right=right,
+        bottom=bottom,
+        top=top,
+    )
+
+    # -------------------------
+    # Optional saving
+    # -------------------------
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if save_format is None:
+            save_format = save_path.suffix.replace(".", "")
+            if save_format == "":
+                save_format = "png"
+
+        fig.savefig(
+            save_path,
+            format=save_format,
+            dpi=int(dpi),
+            bbox_inches="tight",
+            pad_inches=0.03,
+        )
+
+    return fig, ax, meta
+
+
 # Backward-compatible private name from exploratory notebook.
 _draw_3d_box_edges = draw_3d_box_edges
 _style_3d_axes = style_3d_axes
@@ -4423,6 +4638,7 @@ __all__ = [
     "stations_by_hypo_distance_km",
     "window_l2_energy",
     "plot_event_moveout_picks_only",
+    "plot_event_moveout_pretty",
     "plot_event_spectrograms_vertical_picks_only",
     "ellipse_lonlat_from_km",
     "plot_catalog_3d_topo_seismicity",

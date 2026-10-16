@@ -146,11 +146,12 @@ You only run `QQ_driver.py`; it calls the scripts below in order. Each one can a
 | `QQ_pick_arpick.py` | Optional pick refinement with ObsPy `ar_pick` |
 | `QQ_location.py` | HypoInverse + HypoDD through HypoXPy |
 | `QQ_qc.py` | Quality control and QC figures |
-| `qq_helpers.py` | Plotting functions used by the notebooks |
+| `qq_helpers.py` | Plotting functions used by the notebooks (3D views also need the optional packages `plotly` and `pygmt`) |
 
 | Notebook | Use |
 |---|---|
 | `quickquake/visualization.ipynb` | Maps, 3D views, cross-sections and timelines of the catalog |
+| `quickquake/catalog_visualization_clean.ipynb` | Publication figures of the final catalog (daily counts, maps, zoom, timeline, cross-section); figures are saved in `data/images/` |
 | `quickquake/qc_inspection.ipynb` | Inspect the QC energy-versus-velocity curves |
 | `quickquake/frequency_index/FI.ipynb` | Frequency Index classification (VT / LP); first run `QQ_merge_stationxml.py --data_root <your data folder>` |
 
