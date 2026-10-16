@@ -9,9 +9,8 @@ This repository contains the Python scripts for wrapping up and streamlining the
 
 | Step | Program |
 |---|---|
-| Station and waveform download | [ObsPy](https://github.com/obspy/obspy) FDSN clients (EarthScope/IRIS and others) |
-| Phase picking | [PhaseNet](https://github.com/AI4EPS/PhaseNet) (deep learning) |
-| Association | [GaMMA](https://github.com/AI4EPS/GaMMA) (Bayesian Gaussian mixture) |
+| Phase picking | [PhaseNet](https://github.com/AI4EPS/PhaseNet) |
+| Association | [GaMMA](https://github.com/AI4EPS/GaMMA) |
 | Location and relocation | HypoInverse and HypoDD, through [HypoXPy](https://github.com/xtyangpsp/HypoXPy) |
 | Quality control | QuickQuake energy-versus-velocity test |
 
@@ -157,5 +156,4 @@ QuickQuake is developed by Elizabeth Alzate Gutierrez and Xiaotao Yang. If you u
 - QuakeFlow: Zhu, W., et al. (2023). QuakeFlow: a scalable machine-learning-based earthquake monitoring workflow with cloud computing. *Geophysical Journal International*, 232(1), 684–693.
 - HypoInverse: Klein, F. W. (2002). User's guide to HYPOINVERSE-2000. *U.S. Geological Survey Open-File Report* 02-171.
 - HypoDD: Waldhauser, F. (2001). hypoDD: a program to compute double-difference hypocenter locations. *U.S. Geological Survey Open-File Report* 01-113.
-- ObsPy: Beyreuther, M., et al. (2010). ObsPy: a Python toolbox for seismology. *Seismological Research Letters*, 81(3), 530–533.
 - HypoXPy: https://github.com/xtyangpsp/HypoXPy
