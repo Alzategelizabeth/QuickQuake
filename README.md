@@ -22,10 +22,10 @@ Parts of the download, picking and association scripts are modified from [QuakeF
 | Path | What it is |
 |---|---|
 | `quickquake/QQ_driver.py` | **The file you edit**: all settings at the top  |
-| `quickquake/` | The scripts of each step (see section 7)|
+| `quickquake/` | The scripts of each step (see section 6) |
 | `examples/` | A ready-to-run driver: Pavlof Volcano (Alaska) |
 | `hypox_templates/` | Velocity models and HypoInverse/HypoDD parameter templates |
-| `dependencies/` | Source code of PhaseNet, GaMMA, HypoXPy and HypoInverse |
+| `dependencies/` | Source code of PhaseNet, GaMMA and HypoXPy (HypoXPy includes HypoInverse and HypoDD) |
 | `install.sh` | The installer just run once|
 | `environment.yml` | List of Python packages and versions that `install.sh` needs |
 
@@ -45,11 +45,11 @@ conda activate quickquake
 
 ### Installing HypoInverse and HypoDD
 
-The location step needs three compiled programs: `hyp1.40` (HypoInverse), `hypoDD` and `ph2dt`. Their source code is included. Install `gfortran` (macOS: `brew install gcc`; Ubuntu: `sudo apt install gfortran`), then:
+The location step needs three compiled programs: `hyp1.40` (HypoInverse), `hypoDD` and `ph2dt`. Their source code comes with [HypoXPy](https://github.com/xtyangpsp/HypoXPy), in `dependencies/HypoXPy/external/` (downloaded by `git clone --recurse-submodules`). Compile them from there: the HypoXPy makefile of HypoInverse has the compiler options this old Fortran code needs. Install `gfortran` (macOS: `brew install gcc`; Ubuntu: `sudo apt install gfortran`), then:
 
 ```bash
 mkdir -p ~/bin
-cd dependencies/hyp1.40/source && make && cp hyp1.40 ~/bin/ && cd -
+cd dependencies/HypoXPy/external/hypoinverse1.40/source && make && cp hyp1.40 ~/bin/ && cd -
 cd dependencies/HypoXPy/external/hypodd2.1/src && make && cp hypoDD/hypoDD ph2dt/ph2dt ~/bin/ && cd -
 ```
 
@@ -88,7 +88,7 @@ The settings you will change most often:
 | `RUN_...` | Turn each step on or off, e.g. rerun only `RUN_LOCATION` and `RUN_QC`; the options of each step are listed right below its switch |
 | `center`, `deg` | `(longitude, latitude)` of the area and the size of the box around it |
 | `station_search` | `"radius"` (default): every seismic station within `station_maxradius`, best channel set chosen from the data. `"box"`: listed `networks`/`channels` inside the box (original method, used by the Pavlof example) |
-| `gamma_use_dbscan` | `False` (default): one job on one CPU (original). `True`: DBSCAN groups on several CPUs (`gamma_ncpu`), much faster; check `gamma_dbscan_eps` (section 5) |
+| `gamma_use_dbscan` | `False` (default): one job on one CPU (original). `True`: DBSCAN groups on several CPUs (`gamma_ncpu`), much faster; choose `gamma_dbscan_eps` by comparing DBSCAN on and off on one chunk (see the comments in `QQ_driver.py`) |
 | `location_p_model`, `location_s_model` | Velocity models: a file in `hypox_templates/` or a path to your own `.cre` file |
 | `location_ref_ele` | Reference elevation for HypoInverse (highest station or topography, km) |
 | `qc_max_plots` | Number of QC figures (default 20; `None` = one for every event) |
@@ -117,8 +117,9 @@ Inside the `data/` folder next to your driver:
 |---|---|
 | `QuickQuake was not found` | Set `QUICKQUAKE_DIR` at the top of your driver |
 | Location step: `hyp1.40` not found | Compile HypoInverse/HypoDD (section 1) or set `location_binpath` |
+| macOS, while compiling: `ld: library 'System' not found` | Run `make` as `SDKROOT=$(xcrun --show-sdk-path) make` |
 | `[SKIP] GaMMA: picks.csv does not exist` | No data or no picks in that chunk; check the chunk's download output in the log |
-| GaMMA is very slow | `gamma_use_dbscan = True` (section 5) |
+| GaMMA is very slow | `gamma_use_dbscan = True` (see `gamma_use_dbscan` in section 3) |
 
 
 ## 6. Scripts and notebooks
