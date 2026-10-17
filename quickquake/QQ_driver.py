@@ -121,7 +121,8 @@ arpick_l_s = 0.2                  # S picker smoothing/control parameter
 arpick_keep_debug_cols = True     # Save debug columns in output CSV
 
 RUN_LOCATION      =  True
-location_binpath = str(Path.home() / "bin")  # folder with hyp1.40, hypoDD and ph2dt
+location_binpath = None   # folder with hyp1.40, hypoDD and ph2dt; None = the programs install.sh
+                          # compiled into this conda environment (or ~/bin if they are not there)
 location_namebase = "GAMMA"
 location_extra_args = []   # e.g., ["--cleanup"]
 location_p_model = "velo_p_rv_avo.cre"
@@ -378,11 +379,18 @@ def main():
     else:
         picks_file = DATA_ROOT / "merged" / "gammapicks_id.csv"
     if RUN_LOCATION:
+        # install.sh puts hyp1.40, hypoDD and ph2dt next to this environment's python;
+        # older installations kept them in ~/bin. A folder written in location_binpath wins.
+        binpath = location_binpath
+        if binpath is None:
+            env_bin = Path(sys.executable).parent
+            binpath = env_bin if (env_bin / "hyp1.40").exists() else Path.home() / "bin"
+        print(f"HypoInverse/HypoDD programs from: {binpath}")
         cmd_loc = [
         sys.executable, str(SCRIPTS["location"]),
         "--merged_dir", str(DATA_ROOT / "merged"),
         "--templates_dir", str(location_templates_dir),
-        "--binpath", str(location_binpath),
+        "--binpath", str(binpath),
         "--namebase", str(location_namebase),
          "--picks_file", str(picks_file),
         "--p_model", str(location_p_model),

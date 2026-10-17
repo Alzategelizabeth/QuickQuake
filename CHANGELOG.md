@@ -10,7 +10,17 @@ Versions stay 0.x until the first official release (1.0).
 - `examples/pavlof_2021/`: radius search within 0.6 degrees of the volcano (the AV network is within 0.51 degrees).
 - README: HypoInverse is compiled from HypoXPy (`dependencies/HypoXPy/external/hypoinverse1.40`), whose makefile has the compiler options this old Fortran code needs; added the macOS fix for `ld: library 'System' not found`.
 - Removed `dependencies/hyp1.40`: a second copy of the HypoInverse source with a makefile without those options (on the Pavlof example its HypoInverse catalog had 56 instead of 57 good locations), plus 47 compiled `.o` files.
-- Added `environment_mac.yml` (conda environment used on macOS).
+- One-step installation: `environment.yml` now also installs the compilers (`gfortran`, `c-compiler`, `make`), and `install.sh` compiles HypoInverse (`hyp1.40`), HypoDD and `ph2dt` from `dependencies/HypoXPy/external/` into the conda environment (in a temporary folder, from the sources stored in git, so old `.o` files are never reused and nothing is written to `~/bin`). Checked on the Pavlof example: programs built with conda-forge gfortran give the same results as programs built with Homebrew gfortran from the same sources.
+- Drivers: `location_binpath = None` (new default) uses the programs compiled into the environment, or `~/bin` if they are not there.
+- Removed `environment_mac.yml`: `environment.yml` solves on macOS (Intel and Apple chips).
+- README: installation is clone (`--depth 1`, without the history) + `bash install.sh` + `conda activate`; the manual compilation section and the macOS `SDKROOT` fix were removed (install.sh does both).
+- `.gitignore`: `.claude/` (local Claude Code files) and `compile_error.log`.
+- `examples/pavlof_2021/QQ_driver.py`: `RUN_CONFIG`, `RUN_DL` and `RUN_PHASENET` are on again, so the example runs from the download to the QC. Checked from a fresh clone: `install.sh` (3 min) + the Pavlof example (4.5 min) give HypoDD and QC catalogs byte-identical to the previous run.
+- 3D views without pygmt: pygmt (GMT) cannot be installed next to TensorFlow 2.14, because GMT needs newer system libraries (icu, grpc, abseil, proj). The new `qq_helpers.load_earth_relief` downloads the same SRTM15+ v2.7 tiles from the GMT data server and reads them with `requests` + `pillow`; it returns the same grid as `pygmt.datasets.load_earth_relief` (checked: identical values and coordinates for 8 test regions at 15s, 30s, 01m and 05m, including regions over 2 and 4 tiles). The five 3D functions use it. Tiles are kept in `~/.quickquake/earth_relief/`.
+- `environment.yml`: added `pillow`, `plotly=7.0` and `python-kaleido=1.3` (newest versions for Python 3.10; they install without changing TensorFlow, Keras or scikit-learn).
+- `qq_helpers.plot_catalog_3d_topo_seismicity`: `write_image` no longer passes `engine=` (removed in plotly 7); the `image_engine` option is kept but unused.
+- `qq_helpers.plot_mapview3d_timecolor` and `plot_mapview3d_months`: fixed `NameError: sizes` (since v4.7); marker area is again `size_k * magnitude`, as before v4.7.
+- Notebooks: the plotly renderer is `plotly_mimetype+notebook_connected`, so the 3D figure shows in VS Code as well as in Jupyter.
 
 ## v0.5 (2026-10-15)
 

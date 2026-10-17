@@ -1411,6 +1411,174 @@ def plot_timeline_legend_only(
 
 
 # ============================================================
+# ELEVATION GRID (topography + bathymetry) WITHOUT GMT
+# ============================================================
+#
+# The 3D views need an elevation grid. pygmt cannot be installed next to
+# TensorFlow 2.14 (GMT needs newer system libraries), so load_earth_relief()
+# below downloads the SAME files pygmt downloads (SRTM15+ v2.7, Tozer et al.,
+# 2019, https://doi.org/10.1029/2019EA000658) from the GMT data server and
+# reads them with requests + Pillow. On the Pavlof and East Greenland test
+# regions it returns exactly the same nodes and values as
+# pygmt.datasets.load_earth_relief.
+
+# GMT data servers, tried in this order until one answers. Only the main server is
+# listed: it is the default of pygmt/GMT too, and on 2026-10-17 the mirrors on
+# https://www.generic-mapping-tools.org/mirrors/ answered "404 not found" for these tiles.
+GMT_DATA_SERVERS = (
+    "https://oceania.generic-mapping-tools.org",          # main server (U. of Hawaii)
+)
+
+# Resolutions stored on the server as square tiles (from the server table
+# gmt_data_server.txt): resolution -> (tile size in degrees, registrations).
+# "p" = pixel (one value per cell, at the cell centre); "g" = gridline (values on the grid lines).
+EARTH_RELIEF_TILES = {
+    "15s": (10, ("p",)),          # 15 arc-seconds (~460 m at the equator)
+    "30s": (15, ("g", "p")),
+    "01m": (30, ("g", "p")),      # 1 arc-minute (~1.85 km)
+    "02m": (60, ("g", "p")),
+    "03m": (90, ("g", "p")),
+    "04m": (180, ("g", "p")),
+    "05m": (180, ("g", "p")),
+}
+EARTH_RELIEF_SCALE_M = 0.5        # tiles store integers: metres = integer * 0.5
+EARTH_RELIEF_CACHE = Path.home() / ".quickquake" / "earth_relief"
+
+
+def _read_earth_relief_tile(url_path: str, cache_file: Path) -> np.ndarray:
+    """
+    One tile as elevation in metres, row 0 = SOUTH edge. Downloaded once, then read
+    from cache_file. The tiles are JPEG2000 images where each pixel is an elevation.
+    """
+    import io
+    import requests
+    from PIL import Image
+
+    if cache_file.exists():
+        data = cache_file.read_bytes()
+    else:
+        data = None
+        for server in GMT_DATA_SERVERS:
+            try:
+                response = requests.get(server + url_path, timeout=120)
+            except requests.RequestException:
+                continue                      # server down or unreachable: try the next one
+            if response.status_code == 200:
+                data = response.content
+                print(f"[earth relief] downloaded {cache_file.name} ({len(data) / 1e6:.1f} MB) from {server}")
+                break
+        if data is None:
+            raise RuntimeError(f"No GMT data server answered for {url_path}. Check the internet connection.")
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_bytes(data)
+
+    # Is the stored integer signed? Read it from the JPEG2000 header (SIZ segment, which
+    # comes right after the start marker FF4F FF51): byte Ssiz, bit 7 = signed, bits 0-6 = bits - 1.
+    siz = data.find(b"\xff\x4f\xff\x51")
+    if siz < 0:
+        raise ValueError(f"{cache_file} is not a JPEG2000 file; delete it and run again.")
+    ssiz = data[siz + 2 + 40]
+    signed, nbits = bool(ssiz & 0x80), (ssiz & 0x7F) + 1
+
+    Image.MAX_IMAGE_PIXELS = None             # a 15s tile is 2400 x 2400 pixels: not an attack
+    image = Image.open(io.BytesIO(data))
+    if nbits != 16 or not image.mode.startswith("I;16"):
+        raise ValueError(f"Unexpected tile format ({nbits} bits, Pillow mode {image.mode}) in {cache_file}.")
+    raw = np.asarray(image).astype(np.int32)
+    # Pillow returns signed 16-bit data shifted by +32768 (checked against GMT's own
+    # conversion of a tile: identical after removing the shift).
+    stored = raw - 2 ** (nbits - 1) if signed else raw
+    return stored[::-1].astype(float) * EARTH_RELIEF_SCALE_M
+
+
+def load_earth_relief(
+    resolution: str = "15s",
+    region: Sequence[float] = None,
+    registration: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Elevation grid for a region, like pygmt.datasets.load_earth_relief but without GMT.
+
+    resolution  : "15s", "30s", "01m", "02m", "03m", "04m" or "05m"
+    region      : [lon_min, lon_max, lat_min, lat_max] in degrees
+    registration: None (same rule as pygmt: "gridline" if it exists, else "pixel"),
+                  "gridline" or "pixel"
+    cache_dir   : folder for the downloaded tiles (default ~/.quickquake/earth_relief);
+                  later runs read them from there, without internet
+
+    Returns lon (1-D, degrees east), lat (1-D, degrees north, increasing) and
+    z (2-D, metres above sea level, negative = below; shape len(lat) x len(lon)).
+    """
+    if resolution not in EARTH_RELIEF_TILES:
+        raise ValueError(f"resolution must be one of {list(EARTH_RELIEF_TILES)}, not {resolution!r}.")
+    tile_deg, available = EARTH_RELIEF_TILES[resolution]
+    if registration is None:
+        reg = "g" if "g" in available else "p"
+    else:
+        reg = {"gridline": "g", "pixel": "p"}.get(registration)
+        if reg not in available:
+            raise ValueError(f"registration for {resolution} must be one of "
+                             f"{['gridline' if r == 'g' else 'pixel' for r in available]}.")
+    west, east, south, north = [float(v) for v in region]
+    if not (-180.0 <= west < east <= 180.0 and -90.0 <= south < north <= 90.0):
+        raise ValueError("region must be [lon_min, lon_max, lat_min, lat_max] inside -180..180 / -90..90 "
+                         "(regions crossing the 180-degree meridian are not supported).")
+
+    step = int(resolution[:2]) / (3600.0 if resolution.endswith("s") else 60.0)   # degrees
+    half = 0.5 if reg == "p" else 0.0         # pixel: values sit half a step inside the cell
+    eps = 1e-9                                # absorbs rounding when an edge falls exactly on the grid
+
+    # 1) Which nodes to return, as integer indices on the global grid of this resolution
+    #    (lon = -180 + (i + half) * step, lat = -90 + (j + half) * step). Same rule as GMT:
+    #    pixel keeps every cell that touches the region; gridline widens the region
+    #    outward to the nearest node.
+    def index_range(lo, hi, origin):
+        first = int(np.floor((lo - origin) / step + eps))
+        last = int(np.ceil((hi - origin) / step - eps)) - (1 if reg == "p" else 0)
+        return first, last
+
+    i0, i1 = index_range(west, east, -180.0)
+    j0, j1 = index_range(south, north, -90.0)
+    z = np.full((j1 - j0 + 1, i1 - i0 + 1), np.nan)
+
+    # 2) Read every tile that holds some of those nodes and copy its part into z.
+    #    Tiles are named after their south-west corner, e.g. N50W170 = lat 50..60, lon -170..-160.
+    nodes_per_tile = int(round(tile_deg / step))
+    folder = Path(cache_dir) if cache_dir is not None else EARTH_RELIEF_CACHE
+    dataset = f"earth_relief_{resolution}_{reg}"
+
+    def tile_corners(first, last, origin, top):
+        lo = origin + (first + half) * step
+        hi = origin + (last + half) * step
+        start = origin + np.floor((lo - origin) / tile_deg) * tile_deg
+        stop = min(origin + np.floor((hi - origin) / tile_deg) * tile_deg, top - tile_deg)
+        return np.arange(start, stop + tile_deg / 2, tile_deg)
+
+    for lat0 in tile_corners(j0, j1, -90.0, 90.0):
+        for lon0 in tile_corners(i0, i1, -180.0, 180.0):
+            name = (f"{'N' if lat0 >= 0 else 'S'}{abs(int(lat0)):02d}"
+                    f"{'E' if lon0 >= 0 else 'W'}{abs(int(lon0)):03d}")
+            tile = _read_earth_relief_tile(
+                f"/server/earth/earth_relief/{dataset}/{name}.{dataset}.jp2",
+                folder / dataset / f"{name}.{dataset}.jp2",
+            )
+            expected = nodes_per_tile + (1 if reg == "g" else 0)    # gridline tiles include both edges
+            if tile.shape != (expected, expected):
+                raise ValueError(f"Tile {name} has shape {tile.shape}, expected {(expected, expected)}.")
+            ti = int(round((lon0 + 180.0) / step))  # global index of the tile's first column / row
+            tj = int(round((lat0 + 90.0) / step))
+            a, b = max(i0, ti), min(i1, ti + expected - 1)
+            c, d = max(j0, tj), min(j1, tj + expected - 1)
+            if a <= b and c <= d:
+                z[c - j0:d - j0 + 1, a - i0:b - i0 + 1] = tile[c - tj:d - tj + 1, a - ti:b - ti + 1]
+
+    lon = -180.0 + (np.arange(i0, i1 + 1) + half) * step
+    lat = -90.0 + (np.arange(j0, j1 + 1) + half) * step
+    return lon, lat, z
+
+
+# ============================================================
 # 3D MAP VIEWS
 # ============================================================
 
@@ -1430,19 +1598,18 @@ def plot_catalog_3d_topo_seismicity(
     image_format: str = "svg",
     image_width: int = 1200,
     image_height: int = 900,
-    image_engine: str = "kaleido",
+    image_engine: str = "kaleido",   # unused: plotly 7 always uses kaleido (kept so old calls still work)
     region_name: Optional[str] = None,
 ):
     """
     3D catalog plot (region_name is used in the title, e.g. "Pavlof Volcano"):
       - mode="year_month": filter by year and color by month
       - mode="time": color by time (old -> new)
-      - DEM (pygmt) + Surface (plotly) + Scatter3d (plotly)
+      - DEM (load_earth_relief: SRTM15+ from the GMT server) + Surface (plotly) + Scatter3d (plotly)
       - interactive if the renderer is set correctly
-      - optional: fig.show() and fig.write_image()
+      - optional: fig.show() and fig.write_image() (kaleido, needs Google Chrome)
     """
     import plotly.graph_objects as go
-    import pygmt
 
     df = normalize_catalog(catalog, catc=catc)
     df = df.dropna(subset=[catc.time, catc.lat, catc.lon]).copy()
@@ -1466,10 +1633,8 @@ def plot_catalog_3d_topo_seismicity(
     maxlat = float(df[catc.lat].max())
     region = [minlon, maxlon, minlat, maxlat]
 
-    grid = pygmt.datasets.load_earth_relief(dem_res, region=region)
-    lon = grid["lon"].values
-    lat = grid["lat"].values
-    elev_km = grid.values / 1000.0
+    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
+    elev_km = elev_m / 1000.0
 
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(topo_exagg)
@@ -1581,7 +1746,6 @@ def plot_catalog_3d_topo_seismicity(
             format=image_format,
             width=int(image_width),
             height=int(image_height),
-            engine=image_engine,
         )
 
     return fig
@@ -1636,7 +1800,6 @@ def plot_mapview3d_months(
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    import pygmt
     from matplotlib.colors import Normalize
 
     if catc is None:
@@ -1683,10 +1846,8 @@ def plot_mapview3d_months(
     maxlat = float(df[catc.lat].max())
     region = [minlon, maxlon, minlat, maxlat]
 
-    grid = pygmt.datasets.load_earth_relief(dem_res, region=region)
-    lon = grid["lon"].values
-    lat = grid["lat"].values
-    elev_km = grid.values / 1000.0
+    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
+    elev_km = elev_m / 1000.0
 
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(exagg)
@@ -1712,7 +1873,7 @@ def plot_mapview3d_months(
         c=df["month"].to_numpy(),
         cmap=quake_cmap,
         norm=Normalize(vmin=1, vmax=12),
-        s=sizes,
+        s=float(size_k) * df[mag_col].to_numpy(),   # marker area (pt^2) = size_k * magnitude, as before v4.7
         edgecolor="k",
         linewidth=0.2,
         alpha=1.0,
@@ -1816,7 +1977,6 @@ def plot_mapview3d_timecolor(
     import pandas as pd
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
-    import pygmt
 
     if catc is None:
         catc = CatalogCols()
@@ -1863,10 +2023,8 @@ def plot_mapview3d_timecolor(
     maxlat = float(df[catc.lat].max())
     region = [minlon, maxlon, minlat, maxlat]
 
-    grid = pygmt.datasets.load_earth_relief(dem_res, region=region)
-    lon = grid["lon"].values
-    lat = grid["lat"].values
-    elev_km = grid.values / 1000.0
+    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
+    elev_km = elev_m / 1000.0
 
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(exagg)
@@ -1891,7 +2049,7 @@ def plot_mapview3d_timecolor(
         df[depth_col].astype(float),
         c=df["_t_num"].to_numpy(),
         cmap=quake_cmap,
-        s=sizes,
+        s=float(size_k) * df[mag_col].to_numpy(),   # marker area (pt^2) = size_k * magnitude, as before v4.7
         edgecolor="k",
         linewidth=0.2,
         alpha=1.0,
@@ -2000,7 +2158,6 @@ def plot_mapview3d_groups(
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    import pygmt
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     if catc is None:
@@ -2045,10 +2202,8 @@ def plot_mapview3d_groups(
     maxlat = float(df[catc.lat].max())
     region = [minlon, maxlon, minlat, maxlat]
 
-    grid = pygmt.datasets.load_earth_relief(dem_res, region=region)
-    lon = grid["lon"].values
-    lat = grid["lat"].values
-    elev_km = grid.values / 1000.0
+    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
+    elev_km = elev_m / 1000.0
 
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(exagg)
@@ -2679,7 +2834,6 @@ def animate_mapview3d_timecolor(
     import pandas as pd
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
-    import pygmt
 
     from matplotlib.colors import Normalize
     from matplotlib.animation import FuncAnimation, PillowWriter
@@ -2726,10 +2880,8 @@ def animate_mapview3d_timecolor(
     maxlat = float(df[catc.lat].max())
     region = [minlon, maxlon, minlat, maxlat]
 
-    grid = pygmt.datasets.load_earth_relief(dem_res, region=region)
-    lon = grid["lon"].values
-    lat = grid["lat"].values
-    elev_km = grid.values / 1000.0
+    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
+    elev_km = elev_m / 1000.0
 
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(exagg)

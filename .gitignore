@@ -12,6 +12,7 @@ __pycache__/
 
 # Compiled programs and objects
 *.o
+compile_error.log
 
 # System files and archives
 .DS_Store
@@ -19,3 +20,6 @@ __pycache__/
 
 # Code maps made by graphify
 graphify-out/
+
+# Claude Code settings and work copies (local only)
+.claude/

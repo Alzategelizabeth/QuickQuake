@@ -14,7 +14,7 @@ This repository contains the Python scripts for wrapping up and streamlining the
 | Location and relocation | HypoInverse and HypoDD, through [HypoXPy](https://github.com/xtyangpsp/HypoXPy) |
 | Quality control | QuickQuake energy-versus-velocity test |
 
-Parts of the download, picking and association scripts are modified from [QuakeFlow](https://github.com/AI4EPS/QuakeFlow ).
+
 
 ## This repository
 
@@ -31,28 +31,26 @@ Parts of the download, picking and association scripts are modified from [QuakeF
 
 ## 1. Install
 
-You need [Miniforge](https://github.com/conda-forge/miniforge) (conda) and, for HypoInverse/HypoDD, a Fortran compiler (`gfortran`).
+You only need [Miniforge](https://github.com/conda-forge/miniforge) (conda) and git. On macOS, git comes with the Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
-git clone --recurse-submodules https://github.com/xtyangpsp/QuickQuake.git
+git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/xtyangpsp/QuickQuake.git
 cd QuickQuake
-bash install.sh            # creates the conda environment "quickquake"
+bash install.sh
 conda activate quickquake
 ```
 
-`install.sh` creates the environment from `environment.yml`, installs PhaseNet, GaMMA and HypoXPy from `dependencies/`, and checks whether the HypoInverse/HypoDD programs are in `~/bin`.
+`--depth 1` downloads only the current version of the code, not its whole history. `install.sh` does everything else:
 
-### Installing HypoInverse and HypoDD
+1. creates the conda environment `quickquake` from `environment.yml` (Python packages and the Fortran/C compilers);
+2. installs PhaseNet, GaMMA and HypoXPy from `dependencies/`;
+3. compiles HypoInverse (`hyp1.40`), HypoDD and `ph2dt` from `dependencies/HypoXPy/external/` and puts them inside the environment, where the drivers find them (no `~/bin`, no Homebrew).
 
-The location step needs three compiled programs: `hyp1.40` (HypoInverse), `hypoDD` and `ph2dt`. Their source code comes with [HypoXPy](https://github.com/xtyangpsp/HypoXPy), in `dependencies/HypoXPy/external/` (downloaded by `git clone --recurse-submodules`). Compile them from there: the HypoXPy makefile of HypoInverse has the compiler options this old Fortran code needs. Install `gfortran` (macOS: `brew install gcc`; Ubuntu: `sudo apt install gfortran`), then:
+To use programs you compiled yourself, write their folder in `location_binpath` in your driver.
 
-```bash
-mkdir -p ~/bin
-cd dependencies/HypoXPy/external/hypoinverse1.40/source && make && cp hyp1.40 ~/bin/ && cd -
-cd dependencies/HypoXPy/external/hypodd2.1/src && make && cp hypoDD/hypoDD ph2dt/ph2dt ~/bin/ && cd -
-```
+### Notebooks
 
-If `make` fails, see the README in each folder. The programs can live in any folder; set `location_binpath` in your driver to that folder.
+The notebooks run in the same `quickquake` environment (in VS Code: *Select Kernel* → `quickquake`). The first time, the 3D views download the elevation grid (SRTM15+, about 2–5 MB per 10° × 10° tile) from the GMT data server and keep it in `~/.quickquake/earth_relief/`; later runs work without internet. Saving a 3D figure as SVG/PNG uses `kaleido`, which needs Google Chrome; if Chrome is missing, run `plotly_get_chrome` once.
 
 ## 2. Run the example
 
@@ -116,8 +114,8 @@ Inside the `data/` folder next to your driver:
 | Message | Fix |
 |---|---|
 | `QuickQuake was not found` | Set `QUICKQUAKE_DIR` at the top of your driver |
-| Location step: `hyp1.40` not found | Compile HypoInverse/HypoDD (section 1) or set `location_binpath` |
-| macOS, while compiling: `ld: library 'System' not found` | Run `make` as `SDKROOT=$(xcrun --show-sdk-path) make` |
+| Location step: `hyp1.40` not found | Run `bash install.sh` again (it compiles the programs into the environment) or set `location_binpath` |
+| `install.sh`: compilation failed | Read `compile_error.log`; on macOS install the Xcode Command Line Tools (`xcode-select --install`) |
 | `[SKIP] GaMMA: picks.csv does not exist` | No data or no picks in that chunk; check the chunk's download output in the log |
 | GaMMA is very slow | `gamma_use_dbscan = True` (see `gamma_use_dbscan` in section 3) |
 
@@ -136,7 +134,7 @@ You only run `QQ_driver.py`; it calls the scripts below in order.
 | `QQ_pick_arpick.py` | Optional pick refinement with ObsPy `ar_pick` |
 | `QQ_location.py` | HypoInverse + HypoDD through HypoXPy |
 | `QQ_qc.py` | Quality control and QC figures |
-| `qq_helpers.py` | Plotting functions used by the notebooks (3D views also need the optional packages `plotly` and `pygmt`) |
+| `qq_helpers.py` | Plotting functions used by the notebooks (the 3D views get the elevation grid with `load_earth_relief`, which reads the same SRTM15+ files as pygmt without needing GMT) |
 
 | Notebook | Use |
 |---|---|
@@ -145,7 +143,7 @@ You only run `QQ_driver.py`; it calls the scripts below in order.
 | `quickquake/qc_inspection.ipynb` | Inspect the QC energy-versus-velocity curves |
 | `quickquake/frequency_index/FI.ipynb` | Frequency Index classification (VT / LP); first run `QQ_merge_stationxml.py --data_root <your data folder>` |
 
-Each notebook has a few lines to edit at the top: the `data` folder of your project and the file prefix (`GAMMA`).
+Open the notebooks with the `quickquake` environment as kernel. Each notebook has a few lines to edit at the top: the `data` folder of your project and the file prefix (`GAMMA`).
 
 ## Credits
 

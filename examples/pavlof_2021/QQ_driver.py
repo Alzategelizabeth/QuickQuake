@@ -38,7 +38,7 @@ DATA_ROOT = Path(__file__).resolve().parent / "data"      # results, next to thi
 MODEL_DIR = BASE_DIR / "dependencies/PhaseNet/model/190703-214543"
 
 
-RUN_CONFIG   =  False
+RUN_CONFIG   =  True
 
 # config options (user edits )
 center   = (-161.8903, 55.4133) # central cooordinates for your region of interest 
@@ -47,7 +47,7 @@ client   = "EARTHSCOPE_FEDERATOR"  # FDSN data center; "EARTHSCOPE_FEDERATOR" as
                                    # the backup centers below; a single center (e.g. "IRIS") also works
 region   = "pavlof"
 
-RUN_DL       = False
+RUN_DL       = True
 # download options (user edits )
 # Every seismic station of every network within station_maxradius of center is used;
 # the best channel set of each station is chosen from the data actually available.
@@ -62,7 +62,7 @@ download_retry_sleep = 3             # seconds between attempts
 download_fallback_clients = ["EARTHSCOPE", "GEOFON", "ETH"]  # backup data centers tried in order when the
                                      # federator has no data (GEOFON serves DK.GDH, ETH DK.KARAT)
 
-RUN_PHASENET = False
+RUN_PHASENET = True
 # phasenet options (user edits )
 phasenet_min_p_prob = 0.30
 phasenet_min_s_prob = 0.30
@@ -89,7 +89,7 @@ gamma_depth_max_km     = 60     # deepest event depth searched (km)
 gamma_use_dbscan       = True   # False = all picks of a chunk in one job on 1 CPU (original method)
                                 # True  = split picks into groups (DBSCAN) and associate them on several
                                 #         CPUs; use it for many stations or chunks longer than ~1 hour
-gamma_dbscan_eps       = "auto" # DBSCAN group size in seconds, or "auto" (from station spacing)
+gamma_dbscan_eps       = 10 # DBSCAN group size in seconds, or "auto" (from station spacing)
                                 # "auto" can be too small for dense networks: picks of one earthquake (P and S)
                                 # can span 10 s or more. Pavlof: "auto" gave 6.3 s and lost events; 15 s matched
                                 # the original method.
@@ -124,7 +124,8 @@ arpick_l_s = 0.2                  # S picker smoothing/control parameter
 arpick_keep_debug_cols = True     # Save debug columns in output CSV
 
 RUN_LOCATION      =  True
-location_binpath = str(Path.home() / "bin")  # folder with hyp1.40, hypoDD and ph2dt
+location_binpath = None   # folder with hyp1.40, hypoDD and ph2dt; None = the programs install.sh
+                          # compiled into this conda environment (or ~/bin if they are not there)
 location_namebase = "GAMMA"
 location_extra_args = []   # e.g., ["--cleanup"]
 location_p_model = "velo_p_rv_avo.cre"
@@ -381,11 +382,18 @@ def main():
     else:
         picks_file = DATA_ROOT / "merged" / "gammapicks_id.csv"
     if RUN_LOCATION:
+        # install.sh puts hyp1.40, hypoDD and ph2dt next to this environment's python;
+        # older installations kept them in ~/bin. A folder written in location_binpath wins.
+        binpath = location_binpath
+        if binpath is None:
+            env_bin = Path(sys.executable).parent
+            binpath = env_bin if (env_bin / "hyp1.40").exists() else Path.home() / "bin"
+        print(f"HypoInverse/HypoDD programs from: {binpath}")
         cmd_loc = [
         sys.executable, str(SCRIPTS["location"]),
         "--merged_dir", str(DATA_ROOT / "merged"),
         "--templates_dir", str(location_templates_dir),
-        "--binpath", str(location_binpath),
+        "--binpath", str(binpath),
         "--namebase", str(location_namebase),
          "--picks_file", str(picks_file),
         "--p_model", str(location_p_model),
