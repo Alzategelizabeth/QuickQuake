@@ -20,7 +20,7 @@ This repository contains the Python scripts for wrapping up and streamlining the
 
 | Path | What it is |
 |---|---|
-| `quickquake/QQ_driver.py` | **The file you edit**: all settings at the top  |
+| `quickquake/QQ_driver.py` | **The file you edit**: only settings (the code that runs them is `quickquake/QQ_run.py`) |
 | `quickquake/` | The scripts of each step (see section 6) |
 | `examples/` | A ready-to-run driver: Pavlof Volcano (Alaska) |
 | `hypox_templates/` | Velocity models and HypoInverse/HypoDD parameter templates |
@@ -77,6 +77,8 @@ Keep the code and your projects in separate folders, so each project keeps its o
 
 Results are written to a `data/` folder next to your `QQ_driver.py`.
 
+Your `QQ_driver.py` holds only settings; `quickquake/QQ_run.py` runs the steps with them, so a driver copied into a project keeps working when QuickQuake is updated. If your driver lacks a newer setting, the default is used and the run lists it; a misspelled setting is reported ("Did you mean ...?").
+
 The settings you will change most often:
 
 | Setting | Meaning |
@@ -86,7 +88,7 @@ The settings you will change most often:
 | `center`, `deg` | `(longitude, latitude)` of the area, and the width (degrees) of the box around it where GaMMA searches for events |
 | `station_maxradius` | Every seismic station of every network within this distance (degrees) of `center` is used; the best channel set of each station is chosen from the data actually available |
 | `station_excluded_networks`, `station_excluded_stations` | Networks (e.g. `"SY"`, synthetic data) and stations (as `"NET.STA"`, e.g. `"DK.ILULI"`) to leave out |
-| `gamma_use_dbscan` | `False` (default): one job on one CPU (original). `True`: DBSCAN groups on several CPUs (`gamma_ncpu`), much faster; choose `gamma_dbscan_eps` by comparing DBSCAN on and off on one chunk (see the comments in `QQ_driver.py`) |
+| `gamma_use_dbscan` | `True` (default): DBSCAN groups on several CPUs (`gamma_ncpu`), much faster. `False`: one job on one CPU (original method); choose `gamma_dbscan_eps` by comparing DBSCAN on and off on one chunk (see the comments in `QQ_driver.py`) |
 | `location_p_model`, `location_s_model` | Velocity models: a file in `hypox_templates/` or a path to your own `.cre` file |
 | `location_ref_ele` | Reference elevation for HypoInverse (highest station or topography, km) |
 | `qc_max_plots` | Number of QC figures (default 20; `None` = one for every event) |
@@ -122,10 +124,11 @@ Inside the `data/` folder next to your driver:
 
 ## 6. Scripts and notebooks
 
-You only run `QQ_driver.py`; it calls the scripts below in order.
+You only run `QQ_driver.py`; `QQ_run.py` calls the scripts below in order.
 
 | File | Step |
 |---|---|
+| `QQ_run.py` | Runs the steps with the settings of a driver: checks the settings (defaults, misspelled or old names), then calls the scripts below |
 | `QQ_config.py` | Writes `config.json` for one time chunk |
 | `QQ_dl_stations.py`, `QQ_dl_data.py` | Stations within `station_maxradius` (all networks) and their waveforms; best channel set of each station chosen from the data; backup data centers when the EarthScope federator has no data |
 | `QQ_predict.py` | PhaseNet P/S picking |
