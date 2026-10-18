@@ -33,7 +33,7 @@ echo "==> 1/4 Conda environment '$ENV_NAME'"
 if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     echo "    already exists, not recreated (remove it with: conda env remove -n $ENV_NAME)"
 else
-    "$CONDA" env create -n "$ENV_NAME" -f environment.yml
+    "$CONDA" env create -y -n "$ENV_NAME" -f environment.yml   # -y: no "Confirm changes [Y/n]" question
 fi
 
 echo "==> 2/4 HypoXPy source"
