@@ -2,7 +2,10 @@
 # =================================================================
 # QuickQuake installation (macOS and Linux)
 #
-#   bash install.sh [environment-name]        (default name: quickquake)
+#   bash install.sh [environment-name]            (default name: quickquake)
+#   bash install.sh environment-name --update     (reinstall into an existing environment)
+#
+# An environment that already exists is never removed or changed unless you add --update.
 #
 # Steps:
 #   1. create the conda environment from environment.yml
@@ -17,6 +20,7 @@
 set -euo pipefail
 
 ENV_NAME="${1:-quickquake}"
+UPDATE="${2:-}"                  # "--update" = install into an environment that already exists
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
@@ -29,11 +33,38 @@ else
     exit 1
 fi
 
+# Does an environment with this name already exist? Upper/lower case are ignored, because
+# macOS folder names ignore them: "quickquake" and "QuickQuake" are the same folder.
+env_exists() {
+    if [ "$(echo "$ENV_NAME" | tr '[:upper:]' '[:lower:]')" = "base" ]; then return 0; fi
+    # registered environments (their names and folder names), in any conda installation
+    if conda env list 2>/dev/null | grep -v '^#' | awk 'NF {print $1; print $NF}' |
+       while read -r path; do basename "$path"; done | grep -qix -- "$ENV_NAME"; then
+        return 0
+    fi
+    # a folder of that name in conda's environment folders
+    for dir in $(conda config --show envs_dirs 2>/dev/null | awk '/^  - / {print $2}'); do
+        if [ -e "$dir/$ENV_NAME" ]; then return 0; fi
+    done
+    return 1
+}
+
 echo "==> 1/4 Conda environment '$ENV_NAME'"
-if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-    echo "    already exists, not recreated (remove it with: conda env remove -n $ENV_NAME)"
+if env_exists; then
+    if [ "$UPDATE" != "--update" ]; then
+        echo "    An environment called '$ENV_NAME' (in some upper/lower case) already exists."
+        echo "    Nothing was changed. To install QuickQuake next to it, choose another name:"
+        echo "      bash install.sh quickquake_new"
+        echo "    To reinstall into that same environment (PhaseNet, GaMMA, HypoXPy and the"
+        echo "    compiled programs are replaced; its other packages are not touched):"
+        echo "      bash install.sh $ENV_NAME --update"
+        exit 1
+    fi
+    echo "    already exists: updating it (--update)"
 else
-    "$CONDA" env create -y -n "$ENV_NAME" -f environment.yml   # -y: no "Confirm changes [Y/n]" question
+    # -y answers "Confirm changes [Y/n]". With -y conda also deletes an existing environment
+    # of the same name, which is why env_exists() is checked first.
+    "$CONDA" env create -y -n "$ENV_NAME" -f environment.yml
 fi
 
 echo "==> 2/4 HypoXPy source"

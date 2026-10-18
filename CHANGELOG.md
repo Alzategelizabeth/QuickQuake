@@ -22,7 +22,7 @@ Versions stay 0.x until the first official release (1.0).
 - `qq_helpers.plot_mapview3d_timecolor` and `plot_mapview3d_months`: fixed `NameError: sizes` (since v4.7); marker area is again `size_k * magnitude`, as before v4.7.
 - Notebooks: the plotly renderer is `plotly_mimetype+notebook_connected`, so the 3D figure shows in VS Code as well as in Jupyter.
 - The driver is split in two: `QQ_driver.py` now holds only the settings (about 170 lines instead of 460), and the code that ran the steps moved unchanged to the new `quickquake/QQ_run.py`; the driver ends with `run(globals())`. Drivers copied into projects no longer carry their own (aging) copy of the code. `QQ_run.py` checks the settings: region settings missing -> clear stop; other settings missing -> the default (same values as `quickquake/QQ_driver.py`) is used and listed; misspelled settings -> warning with the closest name; old settings (`station_search`, `networks`, `channels`, `None` retries) -> note, ignored. Checked: the Pavlof example (download to QC) gives byte-identical catalogs; the location step of Aniakchak and Jakobshavn gives byte-identical HypoInverse and HypoDD outputs.
-- `install.sh`: `conda/mamba env create -y`, so it no longer stops at "Confirm changes [Y/n]".
+- `install.sh`: `env create -y`, so it no longer stops at "Confirm changes [Y/n]". Because `-y` also makes conda delete an existing environment of the same name, `install.sh` first checks whether the environment exists, ignoring upper/lower case (on macOS `quickquake` and `QuickQuake` are the same folder); if it exists it stops without changing anything, unless you run `bash install.sh NAME --update` to reinstall into it.
 - README: `gamma_use_dbscan` is `True` by default (it said `False`).
 
 ## v0.5 (2026-10-15)
