@@ -3545,6 +3545,331 @@ def plot_location_evolution_map(
 
 
 # ============================================================
+# FREQUENCY INDEX (FI) COMPOSITION BY MONTH
+# ============================================================
+
+FI_COMPOSITION_COLORS = {
+    "LP": "#66b96b",
+    "NS": "#808080",
+    "VT": "#56B4E9",
+}
+
+
+def fi_monthly_tables(
+    catalog,
+    fi_col="FI",
+    time_col="time",
+    fi_order=("LP", "NS", "VT"),
+    include_empty_months=False,
+):
+    """
+    Monthly number of events per FI class, and the same as a percentage of each month.
+
+    FI labels are stripped and upper-cased; times are parsed as UTC (format="mixed").
+    Months are "YYYY-MM" strings. By default only months with events appear
+    (as in the paper 2 figure), so a month without events leaves no gap on the
+    axis; include_empty_months=True adds those months with zero counts.
+    Returns (counts, percent), DataFrames indexed by month with fi_order columns.
+    """
+    df = catalog.copy()
+    df[time_col] = pd.to_datetime(df[time_col], utc=True, errors="coerce", format="mixed")
+    df = df.dropna(subset=[time_col])
+
+    if fi_col in df.columns:
+        df[fi_col] = df[fi_col].astype(str).str.strip().str.upper()
+    else:
+        df[fi_col] = "UNKNOWN"
+
+    month = df[time_col].dt.to_period("M").astype(str)
+    counts = pd.crosstab(month, df[fi_col])
+    counts = counts.reindex(columns=[c for c in fi_order if c in counts.columns], fill_value=0)
+
+    if include_empty_months and len(counts):
+        all_months = pd.period_range(counts.index.min(), counts.index.max(), freq="M").astype(str)
+        counts = counts.reindex(all_months, fill_value=0)
+
+    counts.index.name = "month"
+    # empty months give 0/0 -> NaN; show them as 0 %
+    percent = (counts.div(counts.sum(axis=1), axis=0) * 100).fillna(0.0)
+    return counts, percent
+
+
+def add_month_spans_inside_axis(
+    ax,
+    month_labels,
+    spans,
+    *,
+    top_margin_fraction=0.03,
+    band_height_fraction=0.035,
+    band_gap_fraction=0.010,
+    cmap_name="Set2",
+    alpha=0.95,
+    text=False,
+    text_fontsize=10,
+):
+    """
+    Draw horizontal bands for time spans INSIDE the top of a monthly bar chart.
+
+    month_labels: the "YYYY-MM" labels of the bars, in order (bar i is at x = i).
+    spans: list of (start, end, label); spans that share a label share a band row
+    and colour. The rows are stacked downwards from the top so they all fit.
+    Each band covers the bars of the months from start to end that are present.
+    Returns (legend handles, {label: colour}).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    month_labels = pd.Index(month_labels).astype(str)
+    month_to_idx = {m: i for i, m in enumerate(month_labels)}
+
+    span_types = list(dict.fromkeys(label for _, _, label in spans))
+
+    cmap = plt.get_cmap(cmap_name)
+    palette = getattr(cmap, "colors", None)
+    if palette is None:
+        palette = [cmap(i) for i in np.linspace(0, 1, max(1, len(span_types)))]
+    color_map = {lab: palette[i % len(palette)] for i, lab in enumerate(span_types)}
+
+    ymin, ymax = ax.get_ylim()
+    yr = ymax - ymin
+
+    band_height = band_height_fraction * yr
+    band_gap = band_gap_fraction * yr
+    top_margin = top_margin_fraction * yr
+
+    n_bands = len(span_types)
+    total_band_block = n_bands * band_height + max(0, n_bands - 1) * band_gap
+
+    # Start just low enough for ALL band rows to fit under the top
+    first_y0 = ymax - top_margin - total_band_block
+
+    band_pos = {}
+    current_y0 = first_y0
+    for lab in span_types:
+        band_pos[lab] = (current_y0, current_y0 + band_height)
+        current_y0 += band_height + band_gap
+
+    handles = []
+    seen = set()
+
+    for start, end, label in spans:
+        start_ts = pd.to_datetime(start, errors="coerce")
+        end_ts = pd.to_datetime(end, errors="coerce")
+        if pd.isna(start_ts) or pd.isna(end_ts):
+            continue
+
+        start_month = start_ts.to_period("M").strftime("%Y-%m")
+        end_month = end_ts.to_period("M").strftime("%Y-%m")
+
+        valid_months = month_labels[(month_labels >= start_month) & (month_labels <= end_month)]
+        if len(valid_months) == 0:
+            continue
+
+        left_month = valid_months.min()
+        right_month = valid_months.max()
+
+        i0 = month_to_idx[left_month]
+        i1 = month_to_idx[right_month]
+
+        x0 = i0 - 0.45
+        width = (i1 - i0) + 0.90
+
+        y0, y1 = band_pos[label]
+
+        rect = plt.Rectangle(
+            (x0, y0),
+            width,
+            y1 - y0,
+            facecolor=color_map[label],
+            edgecolor="none",
+            alpha=alpha,
+            zorder=6,
+            clip_on=True,
+        )
+        ax.add_patch(rect)
+
+        if text:
+            ax.text(
+                x0 + width / 2,
+                y0 + (y1 - y0) / 2,
+                label,
+                ha="center",
+                va="center",
+                fontsize=text_fontsize,
+                zorder=7,
+            )
+
+        if label not in seen:
+            handles.append(mpatches.Patch(color=color_map[label], label=label))
+            seen.add(label)
+
+    return handles, color_map
+
+
+def plot_fi_monthly_composition(
+    catalog,
+    spans=None,
+    *,
+    fi_col="FI",
+    time_col="time",
+    fi_order=("LP", "NS", "VT"),
+    fi_colors=None,
+    include_empty_months=False,
+    title=None,
+    figsize=(16, 6),
+    headroom=1.38,
+    span_cmap="Set2",
+    span_alpha=0.9,
+    savefig=False,
+    out_file=None,
+    show=False,
+):
+    """
+    Two-panel monthly FI figure (as in the paper 2 statistics notebook):
+    top = stacked number of events per FI class, with optional time-span bands;
+    bottom = the same composition in percent.
+
+    spans: list of (start, end, label), e.g. ("2023-03-01", "2023-08-01", "Uplift-AVO").
+    headroom: the top panel's y-limit is the largest monthly total times this
+    factor, leaving room for the bands. fi_colors defaults to FI_COMPOSITION_COLORS.
+    Returns fig, (ax_counts, ax_percent), info with counts, percent,
+    span_handles and span_color_map (use them for the separate legend figure).
+    """
+    import matplotlib.pyplot as plt
+
+    fi_colors = dict(FI_COMPOSITION_COLORS if fi_colors is None else fi_colors)
+    counts, percent = fi_monthly_tables(catalog, fi_col=fi_col, time_col=time_col,
+                                        fi_order=fi_order, include_empty_months=include_empty_months)
+    bar_colors = [fi_colors[col] for col in counts.columns]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1,
+        figsize=figsize,
+        sharex=True,
+        gridspec_kw={"height_ratios": [1.2, 1], "hspace": 0.09}
+    )
+
+    # Top panel: counts
+    counts.plot(
+        kind="bar",
+        stacked=True,
+        ax=ax1,
+        width=0.9,
+        color=bar_colors,
+        legend=False,
+    )
+
+    ax1.set_ylabel("Number of events", fontsize=17)
+    ax1.set_xlabel("")
+    ax1.tick_params(axis="x", labelbottom=False)
+    ax1.tick_params(axis="y", labelsize=15)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3)
+
+    # Extra room at the top INSIDE the axis for the span bands
+    ax1.set_ylim(0, counts.sum(axis=1).max() * headroom)
+
+    span_handles, span_color_map = [], {}
+    if spans:
+        span_handles, span_color_map = add_month_spans_inside_axis(
+            ax=ax1,
+            month_labels=counts.index,
+            spans=spans,
+            top_margin_fraction=0.03,
+            band_height_fraction=0.035,
+            band_gap_fraction=0.010,
+            cmap_name=span_cmap,
+            alpha=span_alpha,
+            text=False,
+            text_fontsize=10,
+        )
+
+    if title:
+        ax1.set_title(title, fontsize=24, pad=18)
+
+    # Bottom panel: percentage
+    percent.plot(
+        kind="bar",
+        stacked=True,
+        ax=ax2,
+        width=0.7,
+        legend=False,
+        color=bar_colors
+    )
+
+    ax2.set_ylabel("Percentage (%)", fontsize=17)
+    ax2.set_xlabel("Month", fontsize=17)
+    ax2.set_ylim(0, 100)
+    ax2.tick_params(axis="x", rotation=90, labelsize=15)
+    ax2.tick_params(axis="y", labelsize=15)
+    ax2.grid(axis="y", linestyle="--", alpha=0.3)
+
+    plt.tight_layout()
+
+    if savefig and out_file:
+        fig.savefig(out_file, bbox_inches="tight")
+        print(f"[ok] saved: {out_file}")
+    if show:
+        plt.show()
+
+    info = dict(counts=counts, percent=percent, span_handles=span_handles, span_color_map=span_color_map)
+    return fig, (ax1, ax2), info
+
+
+def plot_monthly_fi_span_legend_only(
+    *,
+    fi_colors,
+    fi_order,
+    span_color_map,
+    span_order,
+    label_map=None,
+    figsize=(4.2, 3.2),
+    legend_fontsize=15,
+    ncol=1,
+    title=None,
+    show=False,
+):
+    """
+    Separate figure holding only the legend of plot_fi_monthly_composition:
+    one patch per FI class (NS shown as "Unclassified" by default) and per span.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    if label_map is None:
+        label_map = {
+            "LP": "LP",
+            "NS": "Unclassified",
+            "VT": "VT",
+        }
+
+    handles = []
+    for fi in fi_order:
+        handles.append(mpatches.Patch(color=fi_colors[fi], label=label_map.get(fi, fi)))
+
+    for s in span_order:
+        handles.append(mpatches.Patch(color=span_color_map[s], label=s))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axis("off")
+
+    ax.legend(
+        handles=handles,
+        loc="center",
+        frameon=False,
+        fontsize=legend_fontsize,
+        ncol=ncol,
+    )
+
+    if title is not None:
+        ax.set_title(title, fontsize=legend_fontsize + 1)
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig, ax
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -5566,6 +5891,11 @@ __all__ = [
     "build_location_evolution_df",
     "add_panel_label",
     "plot_location_evolution_map",
+    "FI_COMPOSITION_COLORS",
+    "fi_monthly_tables",
+    "add_month_spans_inside_axis",
+    "plot_fi_monthly_composition",
+    "plot_monthly_fi_span_legend_only",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
