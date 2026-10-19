@@ -2889,6 +2889,259 @@ def plot_plane_orientation_rose(
 
 
 # ============================================================
+# MAGNITUDE OF COMPLETENESS
+# ============================================================
+
+def build_fmd(magnitudes, bin_width=0.1):
+    """
+    Frequency-magnitude distribution (FMD) of a set of magnitudes.
+
+    Bins are bin_width wide (magnitude units) and centred on multiples of
+    bin_width. Returns (centers, edges, counts, cumulative_counts): counts[i]
+    is the number of events in bin i and cumulative_counts[i] is N(M >= centers[i]).
+    NaN magnitudes are ignored.
+    """
+    mags = np.asarray(magnitudes, dtype=float)
+    mags = mags[np.isfinite(mags)]
+    if mags.size == 0:
+        raise ValueError("No valid magnitudes.")
+
+    m_min = np.floor(mags.min() / bin_width) * bin_width
+    m_max = np.ceil(mags.max() / bin_width) * bin_width
+
+    centers = np.arange(m_min, m_max + bin_width, bin_width)
+
+    edges = np.concatenate((
+        [centers[0] - bin_width / 2],
+        centers[:-1] + bin_width / 2,
+        [centers[-1] + bin_width / 2]
+    ))
+
+    counts, _ = np.histogram(mags, bins=edges)
+    cumulative_counts = counts[::-1].cumsum()[::-1]   # N(M >= m)
+
+    return centers, edges, counts, cumulative_counts
+
+
+def estimate_mc_maxc(centers, counts):
+    """
+    Magnitude of completeness by maximum curvature (MAXC): the centre of the
+    FMD bin with the most events. MAXC tends to underestimate Mc when the FMD
+    is gradually curved; adding +0.2 is a common correction (Woessner & Wiemer 2005).
+    """
+    return centers[np.argmax(counts)]
+
+
+def fit_gutenberg_richter_line(centers, cumulative_counts, mc, min_cum_count=10):
+    """
+    Least-squares line log10 N(>=M) = intercept + slope * M through the FMD bins
+    with M >= mc and at least min_cum_count events (drops the noisy large-M tail).
+
+    slope is about -b. A least-squares b-value is only indicative; the
+    maximum-likelihood estimate (Aki 1965) is the usual one to report.
+    Returns (slope, intercept), or (nan, nan) when fewer than 2 bins qualify.
+    """
+    centers = np.asarray(centers, dtype=float)
+    cumulative_counts = np.asarray(cumulative_counts)
+
+    fit_mask = (centers >= mc) & (cumulative_counts >= min_cum_count)
+    if fit_mask.sum() < 2:
+        return np.nan, np.nan
+
+    slope, intercept = np.polyfit(centers[fit_mask], np.log10(cumulative_counts[fit_mask]), 1)
+    return slope, intercept
+
+
+def _as_catalog_dict(catalogs, default_label="Catalog"):
+    """One catalog, or a dict {label: catalog} to overlay several."""
+    if isinstance(catalogs, dict):
+        return dict(catalogs)
+    return {default_label: catalogs}
+
+
+def _column_for(col, label):
+    """A column name given once for all catalogs, or per catalog as {label: name}."""
+    return col.get(label) if isinstance(col, dict) else col
+
+
+def _magnitudes_of(catalog, mag_col):
+    """Finite magnitudes from a DataFrame column, or from an array of magnitudes."""
+    if isinstance(catalog, pd.DataFrame):
+        if mag_col not in catalog.columns:
+            raise KeyError(f"Magnitude column '{mag_col}' not found in catalog.")
+        return pd.to_numeric(catalog[mag_col], errors="coerce").dropna().to_numpy()
+    mags = np.asarray(catalog, dtype=float)
+    return mags[np.isfinite(mags)]
+
+
+_MC_COLORS = ["black", "tab:blue", "tab:orange", "tab:green", "tab:purple"]
+
+
+def plot_fmd_cumulative(
+    catalogs,
+    mag_col="magnitude",
+    bin_width=0.1,
+    min_cum_count_for_fit=10,
+    show_fit=True,
+    inset_histogram=True,
+    colors=None,
+    figsize=(10, 6),
+    savefig=False,
+    out_png=None,
+    dpi=300,
+    show=False,
+):
+    """
+    Cumulative frequency-magnitude curve N(M >= m) on a log scale, with the MAXC
+    magnitude of completeness and the Gutenberg-Richter least-squares line.
+
+    catalogs: one catalog (DataFrame with `mag_col`, or an array of magnitudes),
+    or {label: catalog} to overlay several, e.g. {"QuickQuake": qq, "USGS": usgs}.
+    mag_col can be a dict {label: column}. Each catalog gets its own Mc and fit,
+    drawn in its colour. With one catalog the figure is the paper 2 one (black
+    squares, red fit and Mc line, FMD histogram inset).
+    Overlaid catalogs should cover the same area and time window, and their
+    magnitudes may be on different scales (e.g. ML vs QuickQuake magnitude).
+
+    Returns fig, ax, results; results[label] holds n_events, mc, slope,
+    intercept, centers, counts and cumulative_counts.
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+    cats = _as_catalog_dict(catalogs)
+    single = len(cats) == 1
+    colors = colors or {}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    results = {}
+
+    for k, (label, cat) in enumerate(cats.items()):
+        mags = _magnitudes_of(cat, _column_for(mag_col, label))
+        centers, edges, counts, cumulative_counts = build_fmd(mags, bin_width=bin_width)
+        mc = estimate_mc_maxc(centers, counts)
+        slope, intercept = fit_gutenberg_richter_line(centers, cumulative_counts, mc, min_cum_count_for_fit)
+        y_fit_line = 10**(intercept + slope * centers)
+        results[label] = dict(n_events=int(mags.size), mc=float(mc), slope=float(slope),
+                              intercept=float(intercept), centers=centers, counts=counts,
+                              cumulative_counts=cumulative_counts)
+
+        if single:
+            ax.semilogy(centers, cumulative_counts, "ks", ms=5, label="Cumulative count")
+            if show_fit and np.isfinite(slope):
+                ax.semilogy(centers, y_fit_line, "r-", lw=2, label="Linear fit")
+            ax.axvline(mc, color="red", linestyle="--", lw=2, label=f"Mc = {mc:.2f}")
+        else:
+            c = colors.get(label, _MC_COLORS[k % len(_MC_COLORS)])
+            ax.semilogy(centers, cumulative_counts, "s", color=c, ms=5, label=f"{label} (N = {mags.size})")
+            if show_fit and np.isfinite(slope):
+                ax.semilogy(centers, y_fit_line, "-", color=c, lw=2, label=f"{label} fit (slope {slope:.2f})")
+            ax.axvline(mc, color=c, linestyle="--", lw=2, label=f"{label} Mc = {mc:.2f}")
+
+    ax.set_xlabel("Magnitude", fontsize=16)
+    ax.set_ylabel("Cumulative count", fontsize=16)
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.tick_params(axis="both", which="minor", labelsize=11)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=12)
+
+    if inset_histogram:
+        axins = inset_axes(ax, width="35%", height="35%", loc="lower left", borderpad=4)
+        for k, (label, r) in enumerate(results.items()):
+            if single:
+                axins.bar(r["centers"], r["counts"], width=bin_width * 0.9)
+                axins.axvline(r["mc"], color="red", linestyle="--", lw=1.5)
+            else:
+                c = colors.get(label, _MC_COLORS[k % len(_MC_COLORS)])
+                axins.step(r["centers"], r["counts"], where="mid", color=c, lw=1.2)
+                axins.axvline(r["mc"], color=c, linestyle="--", lw=1.5)
+        axins.set_xlabel("M", fontsize=11)
+        axins.set_ylabel("N", fontsize=11)
+        axins.tick_params(axis="both", labelsize=9)
+
+    plt.tight_layout()
+
+    if savefig and out_png:
+        fig.savefig(out_png, dpi=int(dpi), bbox_inches="tight")
+        print(f"[ok] saved: {out_png}")
+    if show:
+        plt.show()
+
+    return fig, ax, results
+
+
+def plot_magnitude_time(
+    catalogs,
+    mc=None,
+    mag_col="magnitude",
+    time_col="time",
+    bin_width=0.1,
+    colors=None,
+    title="Magnitudes through time",
+    figsize=(11, 5),
+    savefig=False,
+    out_png=None,
+    dpi=300,
+    show=False,
+):
+    """
+    Magnitude of every event against its origin time, with a horizontal line at Mc.
+
+    catalogs: one DataFrame or {label: DataFrame} to overlay several.
+    mc: a number, {label: number}, or None to compute the MAXC Mc of each
+    catalog (bins of bin_width). mag_col / time_col can be dicts {label: column}.
+    With one catalog the figure is the paper 2 one (open black circles, red Mc line).
+
+    Returns fig, ax, {label: mc}.
+    """
+    import matplotlib.pyplot as plt
+
+    cats = _as_catalog_dict(catalogs)
+    single = len(cats) == 1
+    colors = colors or {}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    mcs = {}
+
+    for k, (label, df) in enumerate(cats.items()):
+        mcol, tcol = _column_for(mag_col, label), _column_for(time_col, label)
+        if tcol not in df.columns:
+            raise KeyError(f"Time column '{tcol}' not found in catalog '{label}'.")
+        # format="mixed" (as in normalize_catalog): catalogs mix "...:08.61+00:00" and "...:46+00:00";
+        # without it pandas >= 2 silently turns the second kind into NaT and drops those events
+        times = pd.to_datetime(df[tcol], utc=True, errors="coerce", format="mixed")
+        mags = pd.to_numeric(df[mcol], errors="coerce")
+        valid = times.notna() & mags.notna()
+
+        if mc is None:
+            centers, _, counts, _ = build_fmd(_magnitudes_of(df, mcol), bin_width=bin_width)
+            mc_k = estimate_mc_maxc(centers, counts)
+        else:
+            mc_k = _column_for(mc, label)
+        mcs[label] = float(mc_k)
+
+        c = "black" if single else colors.get(label, _MC_COLORS[k % len(_MC_COLORS)])
+        ax.scatter(times[valid], mags[valid], s=18, facecolors="none", edgecolors=c, linewidths=0.8,
+                   label=None if single else f"{label} (N = {int(valid.sum())})")
+        ax.axhline(mc_k, color="red" if single else c, linestyle="-", linewidth=2,
+                   label=f"Mc = {mc_k:.2f}" if single else f"{label} Mc = {mc_k:.2f}")
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Magnitude")
+    ax.set_title(title)
+    ax.legend()
+    plt.tight_layout()
+
+    if savefig and out_png:
+        fig.savefig(out_png, dpi=int(dpi), bbox_inches="tight")
+        print(f"[ok] saved: {out_png}")
+    if show:
+        plt.show()
+
+    return fig, ax, mcs
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -4902,6 +5155,11 @@ __all__ = [
     "add_profile_line",
     "plot_cross_section_seismicity",
     "plot_plane_orientation_rose",
+    "build_fmd",
+    "estimate_mc_maxc",
+    "fit_gutenberg_richter_line",
+    "plot_fmd_cumulative",
+    "plot_magnitude_time",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
