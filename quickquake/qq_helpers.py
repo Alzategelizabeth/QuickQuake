@@ -462,6 +462,8 @@ def plot_mapview_seismicity(
     out_png=None,
     dpi=600,
     region_name=None,
+    catc: Optional[CatalogCols] = None,
+    stc: Optional[StationCols] = None,
 ):
     import matplotlib.pyplot as plt
     import matplotlib as mpl
@@ -478,8 +480,9 @@ def plot_mapview_seismicity(
                 f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
             )
 
-    quakes_for_map = make_quakes_for_map(catalog, start, end)
-    stations_wide = make_stations_wide_for_map(stations)
+    # catc / stc map other column names (e.g. a USGS catalog) onto the default ones
+    quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
+    stations_wide = make_stations_wide_for_map(stations, stc=stc)
 
     if quakes_for_map.empty:
         raise ValueError("No events in the range [start, end].")
@@ -619,6 +622,8 @@ def plot_mapview_basemap_stations(
     savefig=False,
     out_png=None,
     dpi=600,
+    catc: Optional[CatalogCols] = None,
+    stc: Optional[StationCols] = None,
 ):
     import numpy as np
     import pandas as pd
@@ -637,8 +642,9 @@ def plot_mapview_basemap_stations(
             )
 
     # Use catalog ONLY to keep the exact same map bounds
-    quakes_for_map = make_quakes_for_map(catalog, start, end)
-    stations_wide = make_stations_wide_for_map(stations)
+    # catc / stc map other column names (e.g. a USGS catalog) onto the default ones
+    quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
+    stations_wide = make_stations_wide_for_map(stations, stc=stc)
 
     if quakes_for_map.empty:
         raise ValueError("No events to compute the map extent.")
@@ -744,6 +750,7 @@ def plot_mapview_seismicity_zoom(
     ylim=None,
     focal_length=None,
     show=False,
+    catc: Optional[CatalogCols] = None,
 ):
     import numpy as np
     import pandas as pd
@@ -762,7 +769,8 @@ def plot_mapview_seismicity_zoom(
                 f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
             )
 
-    quakes_for_map = make_quakes_for_map(catalog, start, end)
+    # catc maps other column names (e.g. a USGS catalog) onto the default ones
+    quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
 
     if quakes_for_map.empty:
         raise ValueError("No events in the range [start, end].")
