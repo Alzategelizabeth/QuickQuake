@@ -2551,9 +2551,19 @@ def add_profile_line(
     text_offset_deg: float = 0.01,
     fontsize: int = 13,
     marker_size: float = 42,
+    label_offset_start: Optional[Tuple[float, float]] = None,
+    label_offset_end: Optional[Tuple[float, float]] = None,
+    zorder: float = 200,
 ):
     """
     Draw a visible profile line on a Cartopy/Matplotlib map.
+
+    Labels: by default each label sits text_offset_deg (degrees of longitude)
+    outside its end point. label_offset_start / label_offset_end = (dx, dy) in
+    typographic points instead place that label at a fixed screen offset from
+    the point (as in research paper2/qq_helpers.py), which stays the same at any
+    map zoom. zorder sets the drawing layer: line = zorder, end points =
+    zorder + 1, labels = zorder + 2.
     """
     import cartopy.crs as ccrs
     import matplotlib.patheffects as pe
@@ -2568,7 +2578,7 @@ def add_profile_line(
         color=line_color,
         linewidth=float(line_width),
         transform=ccrs.PlateCarree(),
-        zorder=200,
+        zorder=float(zorder),
         solid_capstyle="round",
     )
     line.set_path_effects(pe_line)
@@ -2583,7 +2593,7 @@ def add_profile_line(
         edgecolor="black",
         linewidth=0.8,
         transform=ccrs.PlateCarree(),
-        zorder=201,
+        zorder=float(zorder) + 1,
     )
     sc2 = ax.scatter(
         [float(end_lon)],
@@ -2594,34 +2604,37 @@ def add_profile_line(
         edgecolor="black",
         linewidth=0.8,
         transform=ccrs.PlateCarree(),
-        zorder=201,
+        zorder=float(zorder) + 1,
     )
 
     # etiquetas
-    t1 = ax.text(
-        float(start_lon) - float(text_offset_deg),
-        float(start_lat),
-        str(start_label),
-        transform=ccrs.PlateCarree(),
-        fontsize=int(fontsize),
-        weight="bold",
-        color="white",
-        ha="right",
-        va="center",
-        zorder=202,
-    )
-    t2 = ax.text(
-        float(end_lon) + float(text_offset_deg),
-        float(end_lat),
-        str(end_label),
-        transform=ccrs.PlateCarree(),
-        fontsize=int(fontsize),
-        weight="bold",
-        color="white",
-        ha="left",
-        va="center",
-        zorder=202,
-    )
+    text_style = dict(fontsize=int(fontsize), weight="bold", color="white", zorder=float(zorder) + 2)
+
+    def place_label(lon, lat, label, offset_pts, side):
+        # side = -1 puts the label west of the point (start), +1 east (end)
+        if offset_pts is None:
+            return ax.text(
+                float(lon) + side * float(text_offset_deg),
+                float(lat),
+                str(label),
+                transform=ccrs.PlateCarree(),
+                ha="right" if side < 0 else "left",
+                va="center",
+                **text_style,
+            )
+        return ax.annotate(
+            str(label),
+            xy=(float(lon), float(lat)),
+            xycoords=ccrs.PlateCarree()._as_mpl_transform(ax),
+            xytext=tuple(offset_pts),
+            textcoords="offset points",
+            ha="left",
+            va="bottom",
+            **text_style,
+        )
+
+    t1 = place_label(start_lon, start_lat, start_label, label_offset_start, side=-1)
+    t2 = place_label(end_lon, end_lat, end_label, label_offset_end, side=+1)
     t1.set_path_effects(pe_text)
     t2.set_path_effects(pe_text)
 
