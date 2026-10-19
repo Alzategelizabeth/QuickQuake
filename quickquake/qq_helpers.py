@@ -3142,6 +3142,409 @@ def plot_magnitude_time(
 
 
 # ============================================================
+# LOCATION CHANGES BETWEEN PIPELINE STAGES (GaMMA -> HypoInverse -> HypoDD)
+# ============================================================
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km on a sphere of radius 6371 km (inputs in degrees)."""
+    R = 6371.0
+    lat1 = np.radians(np.asarray(lat1, dtype=float))
+    lon1 = np.radians(np.asarray(lon1, dtype=float))
+    lat2 = np.radians(np.asarray(lat2, dtype=float))
+    lon2 = np.radians(np.asarray(lon2, dtype=float))
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    )
+
+    return 2.0 * R * np.arcsin(np.sqrt(a))
+
+
+def _prep_location_stage(df, stage):
+    """
+    Standard columns (event_id, time, latitude, longitude, depth_km, magnitude)
+    for one pipeline stage, one row per event (the earliest if an id repeats).
+
+    stage = "gamma"   -> merged/input/<namebase>_catalog_cleaned.csv (event_id_mapped, depth in m)
+            "hypoinv" -> merged/output/<namebase>_hypoinv_good.csv (event_id_mapped)
+            "hypodd"  -> merged/output/<namebase>_hypodd_catalog*.csv (event_id)
+    """
+    df = df.copy()
+
+    if stage == "gamma":
+        out = pd.DataFrame({
+            "event_id": df["event_id_mapped"],
+            "time": df["time"],
+            "latitude": df["latitude"],
+            "longitude": df["longitude"],
+            "depth_km": pd.to_numeric(df["depth(m)"], errors="coerce") / 1000.0,
+            "magnitude": df["magnitude"] if "magnitude" in df.columns else np.nan,
+        })
+
+    elif stage == "hypoinv":
+        out = pd.DataFrame({
+            "event_id": df["event_id_mapped"],
+            "time": df["time"],
+            "latitude": df["latitude"],
+            "longitude": df["longitude"],
+            "depth_km": df["depth_km"],
+            "magnitude": df["magnitude"] if "magnitude" in df.columns else np.nan,
+        })
+
+    elif stage == "hypodd":
+        out = pd.DataFrame({
+            "event_id": df["event_id"],
+            "time": df["time"],
+            "latitude": df["latitude"],
+            "longitude": df["longitude"],
+            "depth_km": df["depth_km"],
+            "magnitude": df["magnitude"] if "magnitude" in df.columns else np.nan,
+        })
+
+    else:
+        raise ValueError(f"Unknown stage: {stage} (use 'gamma', 'hypoinv' or 'hypodd').")
+
+    out["event_id"] = pd.to_numeric(out["event_id"], errors="coerce").astype("Int64")
+    out["time"] = pd.to_datetime(out["time"], utc=True, errors="coerce", format="mixed")
+
+    for col in ["latitude", "longitude", "depth_km", "magnitude"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    out = out.dropna(subset=["event_id", "time", "latitude", "longitude"]).copy()
+    out = out.sort_values("time").drop_duplicates(subset="event_id", keep="first")
+    out["event_id"] = out["event_id"].astype(int)
+
+    return out
+
+
+def build_location_evolution_df(gamma_csv, hypoinv_csv, hypodd_csv, start=None, end=None):
+    """
+    Join the GaMMA, HypoInverse and HypoDD locations of the same events.
+
+    Each input is a CSV path or a DataFrame. Only events present in all three
+    stages are kept (inner join on event_id), optionally within [start, end] (UTC).
+    Columns are prefixed gamma_ / hypoinv_ / hypodd_, plus the horizontal shifts
+    in km (great-circle): shift_gamma_hypoinv_km, shift_hypoinv_hypodd_km and
+    shift_gamma_hypodd_km.
+    """
+    def read(x):
+        return x.copy() if isinstance(x, pd.DataFrame) else pd.read_csv(x)
+
+    gamma = _prep_location_stage(read(gamma_csv), "gamma")
+    hypoinv = _prep_location_stage(read(hypoinv_csv), "hypoinv")
+    hypodd = _prep_location_stage(read(hypodd_csv), "hypodd")
+
+    if start is not None:
+        start = pd.to_datetime(start, utc=True)
+        gamma = gamma[gamma["time"] >= start]
+        hypoinv = hypoinv[hypoinv["time"] >= start]
+        hypodd = hypodd[hypodd["time"] >= start]
+
+    if end is not None:
+        end = pd.to_datetime(end, utc=True)
+        gamma = gamma[gamma["time"] <= end]
+        hypoinv = hypoinv[hypoinv["time"] <= end]
+        hypodd = hypodd[hypodd["time"] <= end]
+
+    gamma = gamma.rename(columns={c: f"gamma_{c}" for c in gamma.columns if c != "event_id"})
+    hypoinv = hypoinv.rename(columns={c: f"hypoinv_{c}" for c in hypoinv.columns if c != "event_id"})
+    hypodd = hypodd.rename(columns={c: f"hypodd_{c}" for c in hypodd.columns if c != "event_id"})
+
+    df = (
+        gamma
+        .merge(hypoinv, on="event_id", how="inner")
+        .merge(hypodd, on="event_id", how="inner")
+    )
+
+    df["shift_gamma_hypoinv_km"] = _haversine_km(
+        df["gamma_latitude"], df["gamma_longitude"],
+        df["hypoinv_latitude"], df["hypoinv_longitude"],
+    )
+
+    df["shift_hypoinv_hypodd_km"] = _haversine_km(
+        df["hypoinv_latitude"], df["hypoinv_longitude"],
+        df["hypodd_latitude"], df["hypodd_longitude"],
+    )
+
+    df["shift_gamma_hypodd_km"] = _haversine_km(
+        df["gamma_latitude"], df["gamma_longitude"],
+        df["hypodd_latitude"], df["hypodd_longitude"],
+    )
+
+    return df
+
+
+def _add_segments_geo(ax, x0, y0, x1, y1, color="0.20", lw=1.1, alpha=0.80):
+    """One straight segment per event from (x0, y0) to (x1, y1), lon/lat in degrees."""
+    import cartopy.crs as ccrs
+
+    for xa, ya, xb, yb in zip(x0, y0, x1, y1):
+        ax.plot(
+            [xa, xb],
+            [ya, yb],
+            color=color,
+            linewidth=lw,
+            alpha=alpha,
+            transform=ccrs.PlateCarree(),
+            zorder=1,
+        )
+
+
+def add_panel_label(ax, label, fontsize=18):
+    """
+    Manuscript-style panel label, e.g. "(a)": bold, just outside the upper-left
+    corner of the axes.
+    """
+    ax.text(
+        0.0, 1.035,
+        label,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=fontsize,
+        fontweight="bold",
+        clip_on=False,
+        zorder=50,
+    )
+
+
+def plot_location_evolution_map(
+    df,
+    max_events=1500,
+    random_state=42,
+    figsize=(14, 7),
+    relief_zoom=12,
+    pad_lon=0.01,
+    pad_lat=0.01,
+    step_lon=0.10,
+    step_lat=0.05,
+    x_tick_label_size=18,
+    y_tick_label_size=22,
+    panel_label_size=18,
+    stats_fontsize=13,
+    legend_fontsize=14,
+):
+    """
+    Two map panels showing how each event moves between pipeline stages:
+    (a) GaMMA -> HypoInverse and (b) HypoInverse -> HypoDD. A segment joins the
+    two locations of each event; each panel reports the median horizontal shift (km).
+
+    df: output of build_location_evolution_df. If it has more than max_events
+    rows, a random sample (random_state) is drawn so the map stays readable.
+    Returns fig, axes, plot_df (the events actually drawn).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    import cartopy.crs as ccrs
+    import cartopy.mpl.ticker as cticker
+    from cartopy.io import img_tiles as cimgt
+
+    class ShadedReliefESRI(cimgt.GoogleTiles):
+        def _image_url(self, tile):
+            x, y, z = tile
+            return (
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
+            )
+
+    plot_df = df.copy()
+
+    if max_events is not None and len(plot_df) > max_events:
+        plot_df = plot_df.sample(max_events, random_state=random_state).copy()
+
+    # Manuscript-style panel labels: lowercase, parentheses, bold
+    panels = [
+        ("gamma", "hypoinv", "(a)", "shift_gamma_hypoinv_km"),
+        ("hypoinv", "hypodd", "(b)", "shift_hypoinv_hypodd_km"),
+    ]
+
+    lon_all = np.r_[
+        plot_df["gamma_longitude"].values,
+        plot_df["hypoinv_longitude"].values,
+        plot_df["hypodd_longitude"].values,
+    ]
+    lat_all = np.r_[
+        plot_df["gamma_latitude"].values,
+        plot_df["hypoinv_latitude"].values,
+        plot_df["hypodd_latitude"].values,
+    ]
+
+    minlon = float(np.nanmin(lon_all)) - pad_lon
+    maxlon = float(np.nanmax(lon_all)) + pad_lon
+    minlat = float(np.nanmin(lat_all)) - pad_lat
+    maxlat = float(np.nanmax(lat_all)) + pad_lat
+    extent = (minlon, maxlon, minlat, maxlat)
+
+    center_lon = 0.5 * (minlon + maxlon)
+    center_lat = 0.5 * (minlat + maxlat)
+
+    proj = ccrs.LambertAzimuthalEqualArea(
+        central_longitude=center_lon,
+        central_latitude=center_lat,
+    )
+
+    fig, axes = plt.subplots(
+        1, 2,
+        figsize=figsize,
+        subplot_kw={"projection": proj},
+        sharex=False,
+        sharey=False,
+    )
+
+    gridliners = []
+
+    for ax, (a, b, panel_label, shift_col) in zip(axes, panels):
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+        ax.add_image(ShadedReliefESRI(), int(relief_zoom))
+
+        _add_segments_geo(
+            ax,
+            plot_df[f"{a}_longitude"].values,
+            plot_df[f"{a}_latitude"].values,
+            plot_df[f"{b}_longitude"].values,
+            plot_df[f"{b}_latitude"].values,
+        )
+
+        if a == "gamma" and b == "hypoinv":
+            ax.scatter(
+                plot_df["gamma_longitude"],
+                plot_df["gamma_latitude"],
+                s=100,
+                facecolors="none",
+                edgecolors="#d95f02",
+                linewidths=1.8,
+                label="GaMMA",
+                transform=ccrs.PlateCarree(),
+                zorder=4,
+            )
+
+            ax.scatter(
+                plot_df["hypoinv_longitude"],
+                plot_df["hypoinv_latitude"],
+                s=100,
+                c="#1b9e77",
+                edgecolors="none",
+                label="HypoInverse",
+                transform=ccrs.PlateCarree(),
+                zorder=5,
+            )
+
+        else:
+            ax.scatter(
+                plot_df["hypoinv_longitude"],
+                plot_df["hypoinv_latitude"],
+                s=100,
+                c="#1b9e77",
+                edgecolors="none",
+                label="HypoInverse",
+                transform=ccrs.PlateCarree(),
+                zorder=4,
+            )
+
+            ax.scatter(
+                plot_df["hypodd_longitude"],
+                plot_df["hypodd_latitude"],
+                s=100,
+                facecolors="none",
+                edgecolors="black",
+                linewidths=1.6,
+                label="HypoDD",
+                transform=ccrs.PlateCarree(),
+                zorder=5,
+            )
+
+        add_panel_label(ax, panel_label, fontsize=panel_label_size)
+
+        median_shift = plot_df[shift_col].median()
+
+        ax.text(
+            0.02, 0.04,
+            f"median shift = {median_shift:.2f} km",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=stats_fontsize,
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.6", alpha=0.9),
+            zorder=10,
+        )
+
+        gl = ax.gridlines(
+            draw_labels=True,
+            linestyle="--",
+            linewidth=0.5,
+            alpha=0.4,
+            x_inline=False,
+            y_inline=False,
+        )
+
+        gl.top_labels = False
+        gl.right_labels = False
+
+        gl.xlabel_style = {
+            "size": x_tick_label_size,
+            "color": "black",
+        }
+
+        gl.ylabel_style = {
+            "size": y_tick_label_size,
+            "color": "black",
+            "rotation": 90,
+            "ha": "center",
+            "va": "center",
+        }
+
+        x_start = np.floor(minlon / step_lon) * step_lon
+        x_end = np.ceil(maxlon / step_lon) * step_lon
+
+        y_start = np.floor(minlat / step_lat) * step_lat
+        y_end = np.ceil(maxlat / step_lat) * step_lat
+
+        gl.xlocator = mticker.FixedLocator(
+            np.arange(x_start, x_end + step_lon * 0.5, step_lon)
+        )
+
+        gl.ylocator = mticker.FixedLocator(
+            np.arange(y_start, y_end + step_lat * 0.5, step_lat)
+        )
+
+        gl.xformatter = cticker.LongitudeFormatter()
+        gl.yformatter = cticker.LatitudeFormatter()
+
+        gridliners.append(gl)
+
+        ax.legend(
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.98),
+            frameon=True,
+            facecolor="white",
+            framealpha=0.90,
+            borderaxespad=0.0,
+            fontsize=legend_fontsize,
+        )
+
+    plt.tight_layout(pad=1.2)
+
+    # Cartopy creates the gridline label texts only at draw time; restyle them afterwards
+    fig.canvas.draw()
+
+    for gl in gridliners:
+        for txt in gl.ylabel_artists:
+            txt.set_rotation(90)
+            txt.set_fontsize(y_tick_label_size)
+            txt.set_ha("center")
+            txt.set_va("center")
+
+        for txt in gl.xlabel_artists:
+            txt.set_fontsize(x_tick_label_size)
+
+    return fig, axes, plot_df
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -5160,6 +5563,9 @@ __all__ = [
     "fit_gutenberg_richter_line",
     "plot_fmd_cumulative",
     "plot_magnitude_time",
+    "build_location_evolution_df",
+    "add_panel_label",
+    "plot_location_evolution_map",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
