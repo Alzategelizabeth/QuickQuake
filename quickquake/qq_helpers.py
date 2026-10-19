@@ -4925,6 +4925,390 @@ def plot_combined_reference_residual_histograms(
         plt.rcParams.update(old_rc)
 
 
+# Overview figure of several catalogs, and common map limits for two of them
+
+def add_scale_bar(ax, length_km, lon_min, lon_max, lat_min, lat_max):
+    """
+    Horizontal scale bar of length_km (km) near the lower-left corner of a lon/lat
+    (degree) axis. Uses 111 km per degree times cos(central latitude) for longitude.
+    """
+    lat_center = 0.5 * (lat_min + lat_max)
+    km_per_deg_lon = 111.0 * np.cos(np.deg2rad(lat_center))
+    scale_deg_lon = length_km / km_per_deg_lon
+
+    x0 = lon_min + 0.08 * (lon_max - lon_min)
+    y0 = lat_min + 0.07 * (lat_max - lat_min)
+
+    ax.plot([x0, x0 + scale_deg_lon], [y0, y0], color="black", lw=2.2, solid_capstyle="butt")
+    ax.plot([x0, x0], [y0 - 0.001, y0 + 0.001], color="black", lw=1.7)
+    ax.plot([x0 + scale_deg_lon, x0 + scale_deg_lon], [y0 - 0.001, y0 + 0.001], color="black", lw=1.7)
+
+    ax.text(
+        x0 + 0.5 * scale_deg_lon,
+        y0 + 0.012 * (lat_max - lat_min),
+        f"{length_km:.0f} km",
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5)
+    )
+
+
+def style_axis_full_box(ax, grid_y=False, grid_x=False):
+    """Grey box on all four sides, outward ticks, optional light grid lines."""
+    # full box
+    for side in ["top", "right", "left", "bottom"]:
+        ax.spines[side].set_visible(True)
+        ax.spines[side].set_linewidth(1.0)
+        ax.spines[side].set_color("#444444")
+
+    ax.tick_params(
+        axis="both",
+        direction="out",
+        length=4.5,
+        width=1.0,
+        colors="#333333",
+        labelsize=12
+    )
+
+    if grid_y:
+        ax.grid(axis="y", color="0.85", linestyle="-", linewidth=0.6, alpha=0.7)
+    if grid_x:
+        ax.grid(axis="x", color="0.9", linestyle="-", linewidth=0.6, alpha=0.6)
+
+
+def get_limits_multi(catalog_dict, pad_deg=0.015):
+    """Lon/lat limits (degrees) covering every catalog in {key: DataFrame}, padded by pad_deg."""
+    lon_all = []
+    lat_all = []
+
+    for _, df in catalog_dict.items():
+        if len(df) == 0:
+            continue
+        lon_all.extend(df["longitude"].values.tolist())
+        lat_all.extend(df["latitude"].values.tolist())
+
+    return {
+        "lon_min": min(lon_all) - pad_deg,
+        "lon_max": max(lon_all) + pad_deg,
+        "lat_min": min(lat_all) - pad_deg,
+        "lat_max": max(lat_all) + pad_deg,
+    }
+
+
+def compute_counts_per_bin(df, time_col="time", freq="7D"):
+    """Number of events per time bin (pandas frequency, e.g. "5D" = 5 days)."""
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    return (
+        df.set_index(time_col)
+          .resample(freq)
+          .size()
+    )
+
+
+def plot_three_catalog_overview_pretty(
+    catalog_plot_dict,
+    configs,
+    volcano,
+    year,
+    radius_km=20.0,
+    time_bin="7D",
+    max_depth_km=40.0,
+    save_path=None,
+    plot_order=("qq", "usgs", "avo"),
+    show=True,
+):
+    """
+    Publication-style multi-panel comparison for three catalogs:
+    (a) event counts through time (bins of time_bin, e.g. "5D")
+    (b) magnitude through time
+    (c) map, with the volcano and a 10 km scale bar
+    (d) longitude vs depth (km, down to max_depth_km)
+    (e) latitude vs depth
+
+    catalog_plot_dict: {key: DataFrame with time, latitude, longitude, depth_km, mag}.
+    configs[key] needs "label", "color", "scatter_size" and "scatter_alpha".
+    volcano: {"name", "lat", "lon"}. Only the keys in plot_order are drawn, in that
+    order; any other key is ignored. year and radius_km are only used by the
+    (commented-out) title and are kept for compatibility.
+    Returns fig, {"a": ax, ..., "e": ax}.
+    """
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+
+    catalog_plot_dict = {k: catalog_plot_dict[k] for k in plot_order if k in catalog_plot_dict}
+
+    lims = get_limits_multi(catalog_plot_dict, pad_deg=0.015)
+
+    # reduced figsize so text appears larger
+    fig = plt.figure(figsize=(12.0, 8.8))
+    gs = fig.add_gridspec(
+        3, 2,
+        height_ratios=[0.9, 1.2, 1.0],
+        width_ratios=[1.05, 1.0],
+        hspace=0.5,
+        wspace=0.24
+    )
+
+    handles = []
+    labels = []
+
+    # -------------------------
+    # (a) Event counts
+    # -------------------------
+    ax1 = fig.add_subplot(gs[0, 0])
+
+    for key, df in catalog_plot_dict.items():
+        counts = compute_counts_per_bin(df, time_col="time", freq=time_bin)
+
+        line, = ax1.plot(
+            counts.index,
+            counts.values,
+            lw=2.4,
+            color=configs[key]["color"],
+            alpha=0.95,
+            label=f"{configs[key]['label']} (n={len(df)})"
+        )
+        ax1.scatter(
+            counts.index,
+            counts.values,
+            s=20,
+            color=configs[key]["color"],
+            alpha=0.95,
+            edgecolors="none",
+            zorder=3
+        )
+
+        handles.append(line)
+        labels.append(f"{configs[key]['label']} (n={len(df)})")
+
+    ax1.set_ylabel("Event count", fontsize=14)
+    ax1.set_title("(a)", loc="left", fontweight="bold", fontsize=15)
+    ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    plt.setp(ax1.get_xticklabels(), rotation=20, ha="right")
+    style_axis_full_box(ax1, grid_y=True, grid_x=False)
+
+    # -------------------------
+    # (b) Magnitude through time
+    # -------------------------
+    ax2 = fig.add_subplot(gs[0, 1])
+
+    for key, df in catalog_plot_dict.items():
+        ax2.scatter(
+            df["time"],
+            df["mag"],
+            s=(configs[key]["scatter_size"] ** 2) * 1.3,
+            color=configs[key]["color"],
+            alpha=min(configs[key]["scatter_alpha"], 0.60),
+            edgecolors="none",
+            rasterized=True
+        )
+
+    ax2.set_ylabel("Magnitude", fontsize=14)
+    ax2.set_title("(b)", loc="left", fontweight="bold", fontsize=15)
+    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    plt.setp(ax2.get_xticklabels(), rotation=20, ha="right")
+    style_axis_full_box(ax2, grid_y=True, grid_x=False)
+
+    # -------------------------
+    # (c) Map view
+    # -------------------------
+    ax3 = fig.add_subplot(gs[1:, 0])
+
+    for key, df in catalog_plot_dict.items():
+        ax3.scatter(
+            df["longitude"],
+            df["latitude"],
+            s=(configs[key]["scatter_size"] ** 2),
+            color=configs[key]["color"],
+            alpha=configs[key]["scatter_alpha"],
+            edgecolors="none",
+            rasterized=True
+        )
+
+    ax3.scatter(
+        volcano["lon"],
+        volcano["lat"],
+        marker="*",
+        s=260,
+        color="gold",
+        edgecolors="black",
+        linewidth=1.0,
+        zorder=10
+    )
+
+    ax3.text(
+        volcano["lon"],
+        volcano["lat"] + 0.015 * (lims["lat_max"] - lims["lat_min"]),
+        volcano["name"],
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        fontweight="bold",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.80, pad=1.5)
+    )
+
+    ax3.set_xlim(lims["lon_min"], lims["lon_max"])
+    ax3.set_ylim(lims["lat_min"], lims["lat_max"])
+    ax3.set_xlabel("Longitude", fontsize=14)
+    ax3.set_ylabel("Latitude", fontsize=14)
+    ax3.set_title("(c)", loc="left", fontweight="bold", fontsize=15)
+    style_axis_full_box(ax3, grid_y=False, grid_x=False)
+
+    add_scale_bar(
+        ax3,
+        length_km=10,
+        lon_min=lims["lon_min"],
+        lon_max=lims["lon_max"],
+        lat_min=lims["lat_min"],
+        lat_max=lims["lat_max"]
+    )
+
+    # -------------------------
+    # (d) Longitude vs depth
+    # -------------------------
+    ax4 = fig.add_subplot(gs[1, 1])
+
+    for key, df in catalog_plot_dict.items():
+        ax4.scatter(
+            df["longitude"],
+            df["depth_km"],
+            s=(configs[key]["scatter_size"] ** 2),
+            color=configs[key]["color"],
+            alpha=configs[key]["scatter_alpha"],
+            edgecolors="none",
+            rasterized=True
+        )
+
+    ax4.set_xlim(lims["lon_min"], lims["lon_max"])
+    ax4.set_ylim(max_depth_km, 0)
+    ax4.set_xlabel("Longitude", fontsize=14)
+    ax4.set_ylabel("Depth (km)", fontsize=14)
+    ax4.set_title("(d)", loc="left", fontweight="bold", fontsize=15)
+    style_axis_full_box(ax4, grid_y=True, grid_x=False)
+
+    # -------------------------
+    # (e) Latitude vs depth
+    # -------------------------
+    ax5 = fig.add_subplot(gs[2, 1])
+
+    for key, df in catalog_plot_dict.items():
+        ax5.scatter(
+            df["latitude"],
+            df["depth_km"],
+            s=(configs[key]["scatter_size"] ** 2),
+            color=configs[key]["color"],
+            alpha=configs[key]["scatter_alpha"],
+            edgecolors="none",
+            rasterized=True
+        )
+
+    ax5.set_xlim(lims["lat_min"], lims["lat_max"])
+    ax5.set_ylim(max_depth_km, 0)
+    ax5.set_xlabel("Latitude", fontsize=14)
+    ax5.set_ylabel("Depth (km)", fontsize=14)
+    ax5.set_title("(e)", loc="left", fontweight="bold", fontsize=15)
+    style_axis_full_box(ax5, grid_y=True, grid_x=False)
+
+    # Global legend
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=3,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.985),
+        columnspacing=1.6,
+        handlelength=2.0,
+        fontsize=13
+    )
+
+    # fig.suptitle(
+    #     f"{volcano['name']} seismicity within {radius_km:.0f} km ({year})",
+    #     y=0.995,
+    #     fontsize=17,
+    #     fontweight="bold"
+    # )
+
+    fig.subplots_adjust(top=0.89, left=0.08, right=0.985, bottom=0.12)
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return fig, {"a": ax1, "b": ax2, "c": ax3, "d": ax4, "e": ax5}
+
+
+def get_common_bounds_for_two_catalogs(
+    catalog1,
+    catalog2,
+    start,
+    end,
+    *,
+    depth_filter_min=None,
+    depth_filter_max=None,
+    pad_lon=0.08,
+    pad_lat=0.06,
+    zoom_factor=1.8,
+):
+    """
+    Common map limits for two catalogs (e.g. QuickQuake and USGS) so their zoomed maps
+    can be drawn with the same extent: same padding (degrees), optional depth window
+    (km) and zoom_factor logic as plot_mapview_seismicity_zoom.
+    Returns xlim (lon_min, lon_max) and ylim (lat_min, lat_max) for its xlim / ylim.
+    """
+
+    q1 = make_quakes_for_map(catalog1, start, end).copy()
+    q2 = make_quakes_for_map(catalog2, start, end).copy()
+
+    q = pd.concat([q1, q2], ignore_index=True)
+
+    if depth_filter_min is not None:
+        q = q[q["depth"] >= float(depth_filter_min)].copy()
+
+    if depth_filter_max is not None:
+        q = q[q["depth"] <= float(depth_filter_max)].copy()
+
+    if q.empty:
+        raise ValueError("No events remain after applying the common filters.")
+
+    minlon_data = float(q["lon"].min())
+    maxlon_data = float(q["lon"].max())
+    minlat_data = float(q["lat"].min())
+    maxlat_data = float(q["lat"].max())
+
+    minlon = minlon_data - float(pad_lon)
+    maxlon = maxlon_data + float(pad_lon)
+    minlat = minlat_data - float(pad_lat)
+    maxlat = maxlat_data + float(pad_lat)
+
+    if zoom_factor is not None:
+        if zoom_factor <= 0:
+            raise ValueError("zoom_factor must be > 0")
+
+        clon = 0.5 * (minlon + maxlon)
+        clat = 0.5 * (minlat + maxlat)
+
+        half_width  = 0.5 * (maxlon - minlon) / float(zoom_factor)
+        half_height = 0.5 * (maxlat - minlat) / float(zoom_factor)
+
+        minlon = clon - half_width
+        maxlon = clon + half_width
+        minlat = clat - half_height
+        maxlat = clat + half_height
+
+    xlim = (minlon, maxlon)
+    ylim = (minlat, maxlat)
+
+    return xlim, ylim
+
+
 # ============================================================
 # ANIMATION
 # ============================================================
@@ -6970,6 +7354,12 @@ __all__ = [
     "plot_match_km_histograms",
     "plot_match_km_scatter",
     "plot_combined_reference_residual_histograms",
+    "add_scale_bar",
+    "style_axis_full_box",
+    "get_limits_multi",
+    "compute_counts_per_bin",
+    "plot_three_catalog_overview_pretty",
+    "get_common_bounds_for_two_catalogs",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
