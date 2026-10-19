@@ -750,6 +750,8 @@ def plot_mapview_seismicity_zoom(
     ylim=None,
     focal_length=None,
     show=False,
+    depth_filter_min=None,
+    depth_filter_max=None,
     catc: Optional[CatalogCols] = None,
 ):
     import numpy as np
@@ -774,6 +776,23 @@ def plot_mapview_seismicity_zoom(
 
     if quakes_for_map.empty:
         raise ValueError("No events in the range [start, end].")
+
+    # Optional depth window (km, positive down); the map extent follows the kept events
+    if depth_filter_min is not None:
+        quakes_for_map = quakes_for_map[
+            quakes_for_map["depth"] >= float(depth_filter_min)
+        ].copy()
+
+    if depth_filter_max is not None:
+        quakes_for_map = quakes_for_map[
+            quakes_for_map["depth"] <= float(depth_filter_max)
+        ].copy()
+
+    if quakes_for_map.empty:
+        raise ValueError(
+            "No events remain after applying the depth filter. "
+            "Check depth_filter_min and depth_filter_max."
+        )
 
     # Extent base
     minlon_data = float(quakes_for_map["lon"].min())
@@ -919,6 +938,9 @@ def plot_mapview_seismicity_zoom(
     meta = {
         "bounds": (minlon, maxlon, minlat, maxlat),
         "center": (center_lon, center_lat),
+        "n_events": int(len(quakes_for_map)),
+        "depth_filter_min": depth_filter_min,
+        "depth_filter_max": depth_filter_max,
     }
 
     return fig, ax, meta
