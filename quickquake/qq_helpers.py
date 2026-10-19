@@ -2224,14 +2224,14 @@ def plot_mapview3d_groups(
     plane_polys: Optional[list] = None,
 ):
     """
-    3D plot of topography + seismicity + planes.
+    Plot 3D topography, seismicity, and optional planes.
 
     Earthquake edge colors:
-      - group1_xyz -> group1_edgecolor
-      - group2_xyz -> group2_edgecolor
-      - others     -> black
+      - group1_xyz uses group1_edgecolor
+      - group2_xyz uses group2_edgecolor
+      - all remaining events use other_edgecolor
 
-    Earthquakes can be drawn hollow (no fill).
+    Earthquake markers can optionally be hollow.
     """
 
     import numpy as np
@@ -2336,22 +2336,7 @@ def plot_mapview3d_groups(
 
     mask_other = ~(mask_g1 | mask_g2)
 
-    scatter_kwargs = dict(
-       
-        linewidths=float(quake_edge_lw),
-        alpha=1.0,
-        depthshade=False,
-    )
-
-    if hollow_quakes:
-        scatter_kwargs["facecolors"] = "none"
-
-    # ---------------------------------------------------------
-    # plot grupo 1
-    # ---------------------------------------------------------
-   # ---------------------------------------------------------
-# estilos de scatter
-# ---------------------------------------------------------
+    # Scatter styles
     filled_kwargs = dict(
         linewidths=float(quake_edge_lw),
         alpha=1.0,
@@ -2365,8 +2350,7 @@ def plot_mapview3d_groups(
         facecolors="none",
     )
 
-    # ---------------------------------------------------------
-    # plot grupo 1 (relleno)
+    # Plot group 1 with filled markers.
     # ---------------------------------------------------------
     if mask_g1.any():
         ax.scatter(
@@ -2380,7 +2364,7 @@ def plot_mapview3d_groups(
         )
 
     # ---------------------------------------------------------
-    # plot grupo 2 (relleno)
+    # Plot group 2 with filled markers.
     # ---------------------------------------------------------
     if mask_g2.any():
         ax.scatter(
@@ -2394,26 +2378,27 @@ def plot_mapview3d_groups(
         )
 
     # ---------------------------------------------------------
-    # plot resto (huecos)
+    # Plot remaining events with hollow markers.
     # ---------------------------------------------------------
     if mask_other.any():
+        remaining_style = hollow_kwargs.copy() if hollow_quakes else filled_kwargs.copy()
+        remaining_style["facecolors"] = "none" if hollow_quakes else other_edgecolor
         ax.scatter(
             df.loc[mask_other, catc.lon].astype(float),
             df.loc[mask_other, catc.lat].astype(float),
             df.loc[mask_other, depth_col].astype(float),
             s=sizes[mask_other],
             edgecolors=other_edgecolor,
-            **hollow_kwargs,
+            **remaining_style,
         )
-    # ---------------------------------------------------------
-    # planos
+
+    # Optional plane polygons
     # plane_polys = [
     #   {"xyz": list(zip(plane1_lon, plane1_lat, plane1_z)),
     #    "facecolor": "red", "edgecolor": "darkred", "alpha": 0.30, "lw": 1.0},
     #   {"xyz": list(zip(plane2_lon, plane2_lat, plane2_z)),
     #    "facecolor": "blue", "edgecolor": "navy", "alpha": 0.30, "lw": 1.0},
     # ]
-    # ---------------------------------------------------------
     if plane_polys is not None:
         for poly in plane_polys:
             xyz = np.asarray(poly["xyz"], dtype=float)
@@ -2436,9 +2421,7 @@ def plot_mapview3d_groups(
                 lw=float(poly.get("lw", 1.0)) + 0.5,
             )
 
-    # ---------------------------------------------------------
-    # ejes y estilo
-    # ---------------------------------------------------------
+    # Axis configuration and styling
     ax.tick_params(axis="x", labelsize=int(tick_fontsize), labelrotation=0)
     ax.tick_params(axis="y", labelsize=int(tick_fontsize) + 1, labelrotation=0)
     ax.tick_params(axis="z", labelsize=int(tick_fontsize) + 1, labelrotation=0)
@@ -5310,6 +5293,1068 @@ def get_common_bounds_for_two_catalogs(
 
 
 # ============================================================
+# DBSCAN CLUSTERS AND BEST-FITTING SURFACES (paper 2, planos0.2)
+# ============================================================
+
+def lonlat_to_local_km(lon, lat, lon0, lat0):
+    """Approximate lon/lat -> local Cartesian x/y in km. x=east, y=north."""
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    x = (lon - lon0) * 111.32 * np.cos(np.deg2rad(lat0))
+    y = (lat - lat0) * 111.32
+    return x, y
+
+
+def local_km_to_lonlat(x, y, lon0, lat0):
+    """Local Cartesian x/y km -> lon/lat."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    lon = lon0 + x / (111.32 * np.cos(np.deg2rad(lat0)))
+    lat = lat0 + y / 111.32
+    return lon, lat
+
+
+def dbscan_parameter_scan(points_xyz, eps_values, min_samples_values, min_cluster_size=100, verbose=True):
+    """
+    Run DBSCAN for every (eps, min_samples) pair on earthquake hypocentres.
+
+    points_xyz: N x 3 array of longitude, latitude (degrees), depth (km).
+    Coordinates are converted to local km around the mean lon/lat (lon_ref, lat_ref)
+    and then standardised (each axis divided by its own standard deviation), so
+    eps is in standard-deviation units, not km, and horizontal and vertical
+    distances are weighted by the spread of the data along each axis.
+    A cluster is "large" when it has >= min_cluster_size events.
+
+    Returns {"results": [...], "lon_ref", "lat_ref", "X_km", "X_scaled"}; each
+    result has eps, min_samples, n_clusters, n_large_clusters, n_noise, sizes
+    (descending), silhouette (on non-noise events, NaN if undefined) and labels.
+    """
+    from sklearn.cluster import DBSCAN
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score
+
+    points_xyz_all = np.asarray(points_xyz, dtype=float)
+
+    lon_all = points_xyz_all[:, 0]
+    lat_all = points_xyz_all[:, 1]
+    z_all   = points_xyz_all[:, 2]
+
+    lon_ref = float(lon_all.mean())
+    lat_ref = float(lat_all.mean())
+
+    x_km, y_km = lonlat_to_local_km(lon_all, lat_all, lon_ref, lat_ref)
+    X_km = np.column_stack([x_km, y_km, z_all])
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_km)
+
+    results = []
+
+    for min_samples in min_samples_values:
+        for eps in eps_values:
+            db = DBSCAN(eps=float(eps), min_samples=int(min_samples))
+            labels_tmp = db.fit_predict(X_scaled)
+
+            unique_labels_tmp = [k for k in sorted(set(labels_tmp)) if k != -1]
+            sizes_tmp = sorted([int(np.sum(labels_tmp == k)) for k in unique_labels_tmp], reverse=True)
+
+            n_clusters = len(unique_labels_tmp)
+            n_large_clusters = int(sum(s >= min_cluster_size for s in sizes_tmp))
+            n_noise = int(np.sum(labels_tmp == -1))
+
+            sil = np.nan
+            valid_mask = labels_tmp != -1
+            if n_clusters >= 2 and valid_mask.sum() > 10:
+                try:
+                    sil = float(silhouette_score(X_scaled[valid_mask], labels_tmp[valid_mask]))
+                except Exception:
+                    sil = np.nan
+
+            results.append({
+                "eps": float(eps),
+                "min_samples": int(min_samples),
+                "n_clusters": n_clusters,
+                "n_large_clusters": n_large_clusters,
+                "n_noise": n_noise,
+                "sizes": sizes_tmp,
+                "silhouette": sil,
+                "labels": labels_tmp.copy(),
+            })
+
+    if verbose:
+        print("\nDBSCAN scan results:")
+        for r in results:
+            if r["n_clusters"] > 0:
+                print(
+                    f"eps={r['eps']:.3f}, min_samples={r['min_samples']:2d} | "
+                    f"clusters={r['n_clusters']:2d}, large={r['n_large_clusters']:2d}, "
+                    f"noise={r['n_noise']:4d}, sizes={r['sizes'][:8]}, sil={r['silhouette']}"
+                )
+
+    return {"results": results, "lon_ref": lon_ref, "lat_ref": lat_ref, "X_km": X_km, "X_scaled": X_scaled}
+
+
+def _dbscan_ranking_key(r):
+    """
+    Ranking rule:
+      1. Prefer more large clusters.
+      2. Prefer fewer total clusters, avoiding excessive fragmentation.
+      3. Prefer higher silhouette.
+      4. Prefer fewer noise points.
+    """
+    sil = r["silhouette"]
+    if np.isnan(sil):
+        sil = -999.0
+    return (r["n_large_clusters"], -r["n_clusters"], sil, -r["n_noise"])
+
+
+def select_best_dbscan(results, min_large_clusters=2, verbose=True):
+    """
+    Best DBSCAN solution among those with at least min_large_clusters large clusters,
+    ranked by _dbscan_ranking_key (more large clusters, then fewer clusters, then
+    higher silhouette, then less noise).
+    """
+    valid_results = [r for r in results if r["n_large_clusters"] >= min_large_clusters]
+
+    if len(valid_results) == 0:
+        raise ValueError(
+            f"No DBSCAN solution found with at least {min_large_clusters} large clusters. "
+            "Inspect the printed table and consider lowering min_cluster_size "
+            "or changing eps_values / min_samples_values."
+        )
+
+    best = sorted(valid_results, key=_dbscan_ranking_key, reverse=True)[0]
+
+    if verbose:
+        print("\nSelected DBSCAN solution:")
+        print(f"eps = {best['eps']}")
+        print(f"min_samples = {best['min_samples']}")
+        print(f"cluster sizes = {best['sizes']}")
+        print(f"noise points = {best['n_noise']}")
+
+    return best
+
+
+def dbscan_cluster_table(catalog, labels, catc: Optional[CatalogCols] = None):
+    """
+    One row per DBSCAN cluster (noise, label -1, excluded): cluster_id, n_events,
+    mean_lon, mean_lat, mean_depth_km; sorted by n_events (largest first).
+    DBSCAN ids are not ordered by size.
+    """
+    catc = catc or CatalogCols()
+    labels_db = np.asarray(labels)
+
+    cluster_rows = []
+    for cid in sorted([k for k in set(labels_db) if k != -1]):
+        mask = labels_db == cid
+        cluster_rows.append({
+            "cluster_id": int(cid),
+            "n_events": int(mask.sum()),
+            "mean_lon": float(catalog.loc[mask, catc.lon].mean()),
+            "mean_lat": float(catalog.loc[mask, catc.lat].mean()),
+            "mean_depth_km": float(catalog.loc[mask, catc.depth_km].mean()),
+        })
+
+    return (
+        pd.DataFrame(cluster_rows)
+        .sort_values("n_events", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def select_cluster_ids(df_cluster_sizes, mode="top_n", manual_ids=None, top_n=5, min_events=100):
+    """
+    Cluster ids to fit and plot: mode "all", "top_n" (largest top_n), "manual"
+    (manual_ids, checked to exist) or "min_events" (clusters with >= min_events).
+    """
+    available_ids = df_cluster_sizes["cluster_id"].astype(int).tolist()
+
+    if mode == "all":
+        selected_ids = available_ids
+
+    elif mode == "top_n":
+        selected_ids = (
+            df_cluster_sizes
+            .sort_values("n_events", ascending=False)
+            .head(int(top_n))["cluster_id"]
+            .astype(int)
+            .tolist()
+        )
+
+    elif mode == "manual":
+        if manual_ids is None:
+            raise ValueError("manual_ids must be provided when mode='manual'.")
+
+        selected_ids = [int(cid) for cid in manual_ids]
+        missing = [cid for cid in selected_ids if cid not in available_ids]
+        if missing:
+            raise ValueError(
+                f"These cluster IDs do not exist: {missing}. "
+                f"Available cluster IDs are: {available_ids}"
+            )
+
+    elif mode == "min_events":
+        selected_ids = (
+            df_cluster_sizes
+            .loc[df_cluster_sizes["n_events"] >= int(min_events), "cluster_id"]
+            .astype(int)
+            .tolist()
+        )
+
+    else:
+        raise ValueError("Invalid mode. Use 'all', 'top_n', 'manual', or 'min_events'.")
+
+    return selected_ids
+
+
+def fit_best_surface_pca(
+    points_xyz,
+    lon_ref,
+    lat_ref,
+    degrees=(1, 2, 3),
+    cv_splits=5,
+    simplicity_tolerance=0.05,
+    ridge_alpha=1.0e-3,
+):
+    """
+    Fit and select a smooth surface for one DBSCAN cluster.
+
+    Input coordinates:
+        longitude, latitude, depth_km
+
+    Procedure:
+        1. Convert longitude/latitude to local Cartesian kilometers.
+        2. Rotate the cluster into its principal coordinate system using PCA/SVD.
+        3. Fit w = f(u, v) using polynomial surfaces of several degrees.
+        4. Evaluate each candidate using cross-validation.
+        5. Select the simplest model whose CV RMSE is within the specified
+           tolerance of the best model.
+
+    Degree interpretation:
+        1 = plane
+        2 = quadratic curved surface
+        3 = cubic curved surface
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import KFold, cross_val_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+
+    points_xyz = np.asarray(points_xyz, dtype=float)
+    points_xyz = points_xyz[np.isfinite(points_xyz).all(axis=1)]
+
+    if points_xyz.shape[0] < 10:
+        raise ValueError(
+            f"At least 10 points are recommended for surface fitting; "
+            f"received {points_xyz.shape[0]}."
+        )
+
+    lon = points_xyz[:, 0]
+    lat = points_xyz[:, 1]
+    depth = points_xyz[:, 2]
+
+    x, y = lonlat_to_local_km(
+        lon,
+        lat,
+        lon_ref,
+        lat_ref,
+    )
+
+    P = np.column_stack([x, y, depth])
+
+    centroid = P.mean(axis=0)
+    Q = P - centroid
+
+    # PCA coordinate system.
+    _, singular_values, basis = np.linalg.svd(
+        Q,
+        full_matrices=False,
+    )
+
+    # Remove arbitrary sign ambiguity.
+    if basis[2, 2] < 0:
+        basis[2] *= -1
+
+    # Rotated coordinates:
+    # u and v span the dominant surface directions.
+    # w measures displacement normal to the dominant orientation.
+    UVW = Q @ basis.T
+
+    UV = UVW[:, :2]
+    w = UVW[:, 2]
+
+    n_splits = min(int(cv_splits), len(UV))
+
+    if n_splits < 3:
+        raise ValueError("Not enough points for cross-validation.")
+
+    cv = KFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=42,
+    )
+
+    candidate_results = []
+
+    for degree in degrees:
+        model = make_pipeline(
+            PolynomialFeatures(
+                degree=int(degree),
+                include_bias=False,
+            ),
+            StandardScaler(),
+            Ridge(alpha=float(ridge_alpha)),
+        )
+
+        negative_mse = cross_val_score(
+            model,
+            UV,
+            w,
+            cv=cv,
+            scoring="neg_mean_squared_error",
+            n_jobs=-1,
+        )
+
+        fold_rmse = np.sqrt(-negative_mse)
+        cv_rmse = float(np.mean(fold_rmse))
+        cv_rmse_std = float(np.std(fold_rmse))
+
+        model.fit(UV, w)
+
+        predicted_w = model.predict(UV)
+        residuals = w - predicted_w
+
+        train_rmse = float(
+            np.sqrt(np.mean(residuals**2))
+        )
+
+        candidate_results.append({
+            "degree": int(degree),
+            "model": model,
+            "cv_rmse_km": cv_rmse,
+            "cv_rmse_std_km": cv_rmse_std,
+            "train_rmse_km": train_rmse,
+        })
+
+    best_rmse = min(
+        result["cv_rmse_km"]
+        for result in candidate_results
+    )
+
+    # Prefer a simpler model if its error is close to the best result.
+    acceptable_limit = best_rmse * (
+        1.0 + float(simplicity_tolerance)
+    )
+
+    acceptable_models = [
+        result
+        for result in candidate_results
+        if result["cv_rmse_km"] <= acceptable_limit
+    ]
+
+    selected = min(
+        acceptable_models,
+        key=lambda result: result["degree"],
+    )
+
+    return {
+        "P": P,
+        "centroid": centroid,
+        "basis": basis,
+        "UV": UV,
+        "w": w,
+        "singular_values": singular_values,
+        "model": selected["model"],
+        "selected_degree": selected["degree"],
+        "cv_rmse_km": selected["cv_rmse_km"],
+        "cv_rmse_std_km": selected["cv_rmse_std_km"],
+        "train_rmse_km": selected["train_rmse_km"],
+        "candidate_results": candidate_results,
+        "lon_ref": float(lon_ref),
+        "lat_ref": float(lat_ref),
+    }
+
+
+def make_fitted_surface_mesh(
+    fit,
+    grid_size=45,
+):
+    """
+    Generate a triangular mesh of the selected fitted surface.
+
+    The mesh is restricted to the convex hull of the cluster in local
+    surface coordinates.
+    """
+    from scipy.spatial import Delaunay
+
+    UV = fit["UV"]
+    model = fit["model"]
+
+    umin = float(UV[:, 0].min())
+    umax = float(UV[:, 0].max())
+    vmin = float(UV[:, 1].min())
+    vmax = float(UV[:, 1].max())
+
+    u_values = np.linspace(umin, umax, int(grid_size))
+    v_values = np.linspace(vmin, vmax, int(grid_size))
+
+    U_grid, V_grid = np.meshgrid(
+        u_values,
+        v_values,
+    )
+
+    UV_grid = np.column_stack([
+        U_grid.ravel(),
+        V_grid.ravel(),
+    ])
+
+    # Keep only grid points inside the cluster convex hull.
+    cluster_hull = Delaunay(UV)
+    inside = cluster_hull.find_simplex(UV_grid) >= 0
+
+    UV_inside = UV_grid[inside]
+
+    if UV_inside.shape[0] < 3:
+        raise ValueError(
+            "Not enough grid points inside the cluster hull."
+        )
+
+    predicted_w = model.predict(UV_inside)
+
+    UVW_surface = np.column_stack([
+        UV_inside,
+        predicted_w,
+    ])
+
+    # Transform from PCA coordinates back to x/y/depth coordinates.
+    P_surface = (
+        fit["centroid"]
+        + UVW_surface @ fit["basis"]
+    )
+
+    x_surface = P_surface[:, 0]
+    y_surface = P_surface[:, 1]
+    depth_surface = P_surface[:, 2]
+
+    lon_surface, lat_surface = local_km_to_lonlat(
+        x_surface,
+        y_surface,
+        fit["lon_ref"],
+        fit["lat_ref"],
+    )
+
+    triangulation = Delaunay(UV_inside)
+
+    return {
+        "lon": np.asarray(lon_surface),
+        "lat": np.asarray(lat_surface),
+        "depth": np.asarray(depth_surface),
+        "uv": UV_inside,
+        "triangles": triangulation.simplices,
+    }
+
+
+def plane_dip_deg(normal):
+    """Plane dip in degrees from horizontal: 0 horizontal, 90 vertical."""
+    n = np.asarray(normal, dtype=float)
+    n = n / np.linalg.norm(n)
+    return float(np.degrees(np.arccos(np.abs(n[2]))))
+
+
+def plane_dip_direction_deg(normal):
+    """
+    Dip direction as azimuth clockwise from North.
+
+    x = East, y = North, z = depth positive downward.
+    Down-dip direction = horizontal projection of -normal.
+    """
+    n = np.asarray(normal, dtype=float)
+    n = n / np.linalg.norm(n)
+
+    east  = -n[0]
+    north = -n[1]
+
+    az = (np.degrees(np.arctan2(east, north)) + 360.0) % 360.0
+    return float(az)
+
+
+def surface_fit_orientation(fit):
+    """
+    Dip and dip direction (degrees) of the best-fitting PLANE through a cluster, from a
+    fit_best_surface_pca result: the plane normal is the third PCA axis (smallest
+    spread, made to point downward). This is the total-least-squares plane used in
+    planos0.1, computed here on the same cluster as the selected surface; it does not
+    describe the curvature of a degree 2 or 3 surface.
+    Returns {"dip_deg", "dip_direction_deg", "normal_x", "normal_y", "normal_z",
+    "planarity_ratio_S3_S2", "linearity_ratio_S2_S1"} (S = singular values).
+    """
+    n = np.asarray(fit["basis"][2], dtype=float)
+    s = np.asarray(fit["singular_values"], dtype=float)
+    return {
+        "dip_deg": plane_dip_deg(n),
+        "dip_direction_deg": plane_dip_direction_deg(n),
+        "normal_x": float(n[0]),
+        "normal_y": float(n[1]),
+        "normal_z": float(n[2]),
+        "planarity_ratio_S3_S2": float(s[2] / s[1]),
+        "linearity_ratio_S2_S1": float(s[1] / s[0]),
+    }
+
+
+def fit_cluster_surfaces(
+    df_clusters,
+    cluster_ids,
+    lon_ref,
+    lat_ref,
+    *,
+    label_col="cluster_dbscan",
+    catc: Optional[CatalogCols] = None,
+    degrees=(1, 2, 3),
+    cv_splits=5,
+    simplicity_tolerance=0.05,
+    ridge_alpha=1.0e-3,
+    grid_size=45,
+    verbose=True,
+):
+    """
+    Fit the best surface (fit_best_surface_pca) and its mesh for each selected cluster.
+
+    df_clusters: catalog with the DBSCAN label of each event in label_col.
+    Clusters with fewer than 10 events are skipped.
+    Returns (surface_fits, surface_meshes, cluster_points, df_surface_fits):
+    dicts keyed by cluster id, and one table row per fitted cluster with
+    n_events, selected_degree, cv_rmse_km, cv_rmse_std_km, train_rmse_km plus
+    the dip and dip direction of its best-fitting plane (surface_fit_orientation).
+    """
+    catc = catc or CatalogCols()
+
+    surface_fits = {}
+    surface_meshes = {}
+    cluster_points = {}
+    surface_fit_rows = []
+
+    for cid in cluster_ids:
+        cid = int(cid)
+
+        mask = (
+            df_clusters[label_col].to_numpy()
+            == cid
+        )
+
+        points = (
+            df_clusters.loc[
+                mask,
+                [catc.lon, catc.lat, catc.depth_km],
+            ]
+            .dropna()
+            .to_numpy(dtype=float)
+        )
+        cluster_points[cid] = points
+
+        if points.shape[0] < 10:
+            print(
+                f"Skipping cluster {cid}: "
+                f"not enough points ({points.shape[0]})."
+            )
+            continue
+
+        fit = fit_best_surface_pca(
+            points_xyz=points,
+            lon_ref=lon_ref,
+            lat_ref=lat_ref,
+            degrees=degrees,
+            cv_splits=cv_splits,
+            simplicity_tolerance=simplicity_tolerance,
+            ridge_alpha=ridge_alpha,
+        )
+
+        mesh = make_fitted_surface_mesh(
+            fit,
+            grid_size=grid_size,
+        )
+
+        surface_fits[cid] = fit
+        surface_meshes[cid] = mesh
+
+        surface_fit_rows.append({
+            "cluster_id": cid,
+            "n_events": int(points.shape[0]),
+            "selected_degree": fit["selected_degree"],
+            "cv_rmse_km": fit["cv_rmse_km"],
+            "cv_rmse_std_km": fit["cv_rmse_std_km"],
+            "train_rmse_km": fit["train_rmse_km"],
+            **surface_fit_orientation(fit),
+        })
+
+        if verbose:
+            print(f"\nCluster {cid}")
+            for candidate in fit["candidate_results"]:
+                print(
+                    f"  Degree {candidate['degree']}: "
+                    f"CV RMSE = {candidate['cv_rmse_km']:.3f} km, "
+                    f"training RMSE = "
+                    f"{candidate['train_rmse_km']:.3f} km"
+                )
+            print(
+                f"  Selected degree: "
+                f"{fit['selected_degree']}"
+            )
+
+    df_surface_fits = pd.DataFrame(surface_fit_rows)
+
+    if df_surface_fits.empty:
+        raise RuntimeError(
+            "No surfaces were fitted. "
+            "Check the selected DBSCAN clusters."
+        )
+
+    df_surface_fits = (
+        df_surface_fits
+        .sort_values("n_events", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    return surface_fits, surface_meshes, cluster_points, df_surface_fits
+
+
+CLUSTER_STYLES = [
+    {"color": "red",     "edgecolor": "darkred"},
+    {"color": "blue",    "edgecolor": "navy"},
+    {"color": "orange",  "edgecolor": "darkorange"},
+    {"color": "magenta", "edgecolor": "purple"},
+    {"color": "gold",    "edgecolor": "goldenrod"},
+    {"color": "cyan",    "edgecolor": "teal"},
+    {"color": "lime",    "edgecolor": "green"},
+    {"color": "violet",  "edgecolor": "indigo"},
+    {"color": "brown",   "edgecolor": "saddlebrown"},
+    {"color": "pink",    "edgecolor": "deeppink"},
+]
+
+
+def cluster_style_map(cluster_ids, styles=None):
+    """{cluster id: {"color", "edgecolor"}}, cycling through CLUSTER_STYLES in the given order."""
+    styles = styles or CLUSTER_STYLES
+    return {cid: styles[i % len(styles)] for i, cid in enumerate(cluster_ids)}
+
+
+_SURFACE_MODEL_NAMES = {
+    1: "Plane",
+    2: "Quadratic",
+    3: "Cubic",
+}
+
+
+def plot_cluster_surfaces_3d(
+    df_clusters,
+    cluster_ids,
+    cluster_points,
+    surface_meshes,
+    start,
+    end,
+    *,
+    catc: Optional[CatalogCols] = None,
+    cluster_styles=None,
+    df_surface_fits=None,
+    depth_max=10.0,
+    exagg=2.0,
+    view_elev=5.0,
+    view_azim=265.0,
+    other_hollow_black=True,
+    surface_labels=False,
+    crop_deg=(0.10, 0.03, 0.05, 0.02),
+    focal_length=0.35,
+    dem_res="15s",
+    figsize=(12, 9),
+):
+    """
+    Static 3-D view (topography + seismicity) of the selected DBSCAN clusters and
+    their fitted surfaces, as in paper 2 (planos0.2).
+
+    All events are drawn hollow (black edges if other_hollow_black), each selected
+    cluster in its colour, and each fitted surface as a translucent triangular mesh.
+    crop_deg = (west, east, south, north) degrees trimmed from the plot_mapview3d_groups
+    bounds. surface_labels=True writes "C<id> / model / CV RMSE" at each cluster
+    centre (needs df_surface_fits).
+    Returns fig, ax, meta (meta from plot_mapview3d_groups).
+    """
+    catc = catc or CatalogCols()
+    cluster_styles = cluster_styles or cluster_style_map(cluster_ids)
+
+    fig, ax, meta = plot_mapview3d_groups(
+        catalog=df_clusters,
+        start=start,
+        end=end,
+        depth_max=depth_max,
+        dem_res=dem_res,
+        exagg=exagg,
+        topo_cmap="gist_earth_r",
+        size_k=10.0,
+        topo_alpha=0.35,
+        topo_stride=5,
+        view_elev=view_elev,
+        view_azim=view_azim,
+        n_xticks=5,
+        tick_fontsize=13,
+        figsize=figsize,
+        savefig=False,
+        out_png=None,
+        dpi=800,
+        catc=catc,
+        hollow_quakes=True,
+        quake_edge_lw=0.05,
+        group1_xyz=None,
+        group2_xyz=None,
+        other_edgecolor=(
+            "black"
+            if other_hollow_black
+            else "lightgray"
+        ),
+        plane_polys=None,
+    )
+
+    # DBSCAN cluster points
+    for cid in cluster_ids:
+        cid = int(cid)
+
+        points = cluster_points.get(cid)
+
+        if points is None or points.shape[0] == 0:
+            continue
+
+        style = cluster_styles[cid]
+
+        ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            s=5,
+            c=style["color"],
+            edgecolors=style["edgecolor"],
+            linewidths=0.10,
+            depthshade=False,
+            alpha=0.25,
+            label=f"Cluster {cid}",
+        )
+
+    # Fitted surfaces
+    for cid in cluster_ids:
+        cid = int(cid)
+
+        if cid not in surface_meshes:
+            continue
+
+        mesh = surface_meshes[cid]
+        style = cluster_styles[cid]
+
+        ax.plot_trisurf(
+            mesh["lon"],
+            mesh["lat"],
+            mesh["depth"],
+            triangles=mesh["triangles"],
+            color=style["color"],
+            edgecolor=style["edgecolor"],
+            linewidth=0.15,
+            alpha=0.45,
+            shade=False,
+        )
+
+    # Optional surface labels
+    if surface_labels and df_surface_fits is not None:
+        for _, row in df_surface_fits.iterrows():
+            cid = int(row["cluster_id"])
+
+            points = cluster_points.get(cid)
+
+            if points is None or points.shape[0] == 0:
+                continue
+
+            lon_c = float(np.mean(points[:, 0]))
+            lat_c = float(np.mean(points[:, 1]))
+            depth_c = float(np.mean(points[:, 2]))
+
+            degree = int(row["selected_degree"])
+            model_name = _SURFACE_MODEL_NAMES.get(
+                degree,
+                f"Degree {degree}",
+            )
+
+            label = (
+                f"C{cid}\n"
+                f"{model_name}\n"
+                f"CV RMSE={row['cv_rmse_km']:.2f} km"
+            )
+
+            ax.text(
+                lon_c,
+                lat_c,
+                depth_c,
+                label,
+                fontsize=8,
+                ha="center",
+                va="center",
+                zorder=100,
+            )
+
+    # Figure format
+    minlon, maxlon, minlat, maxlat = meta["bounds"]
+    crop_w, crop_e, crop_s, crop_n = crop_deg
+
+    ax.set_xlim(minlon + crop_w, maxlon - crop_e)
+    ax.set_ylim(minlat + crop_s, maxlat - crop_n)
+
+    ax.set_proj_type(
+        "persp",
+        focal_length=focal_length,
+    )
+
+    ax.set_xlabel(
+        "Longitude",
+        labelpad=12,
+        fontsize=13,
+    )
+
+    ax.set_ylabel(
+        "Latitude",
+        labelpad=12,
+        fontsize=13,
+    )
+
+    ax.zaxis.set_rotate_label(False)
+
+    ax.set_zlabel(
+        "Depth (km)",
+        rotation=90,
+        labelpad=18,
+        fontsize=13,
+    )
+
+    return fig, ax, meta
+
+
+def plot_cluster_surfaces_interactive(
+    cluster_ids,
+    cluster_points,
+    surface_meshes,
+    surface_fits,
+    df_surface_fits,
+    lon_ref,
+    lat_ref,
+    *,
+    cluster_styles=None,
+):
+    """
+    Interactive, rotatable Plotly 3-D view of the selected clusters and fitted
+    surfaces, in local km (East, North, Depth) with the same physical scale on
+    the three axes. Returns the plotly Figure (call .show() or .write_html()).
+    """
+    import plotly.graph_objects as go
+
+    cluster_styles = cluster_styles or cluster_style_map(cluster_ids)
+
+    model_names = {
+        1: "Plane",
+        2: "Quadratic surface",
+        3: "Cubic surface",
+    }
+
+    fig_interactive = go.Figure()
+
+    for cid in cluster_ids:
+        cid = int(cid)
+
+        points = cluster_points.get(cid)
+
+        if points is None or points.shape[0] == 0:
+            continue
+
+        style = cluster_styles[cid]
+        cluster_color = style["color"]
+
+        # Local Cartesian km keep x, y and depth in consistent physical units.
+        x_points, y_points = lonlat_to_local_km(
+            points[:, 0],
+            points[:, 1],
+            lon_ref,
+            lat_ref,
+        )
+
+        model_row = df_surface_fits.loc[
+            df_surface_fits["cluster_id"] == cid
+        ]
+
+        if not model_row.empty:
+            model_row = model_row.iloc[0]
+
+            degree = int(model_row["selected_degree"])
+            model_name = model_names.get(
+                degree,
+                f"Polynomial degree {degree}",
+            )
+
+            cv_rmse = float(model_row["cv_rmse_km"])
+        else:
+            degree = None
+            model_name = "Unknown surface"
+            cv_rmse = np.nan
+
+        # Earthquake points
+        fig_interactive.add_trace(
+            go.Scatter3d(
+                x=x_points,
+                y=y_points,
+                z=points[:, 2],
+                mode="markers",
+                name=f"Cluster {cid} events",
+                legendgroup=f"cluster_{cid}",
+                marker=dict(
+                    size=2.5,
+                    color=cluster_color,
+                    opacity=0.40,
+                ),
+                customdata=np.column_stack([
+                    points[:, 0],
+                    points[:, 1],
+                ]),
+                hovertemplate=(
+                    f"<b>Cluster {cid}</b><br>"
+                    "East: %{x:.2f} km<br>"
+                    "North: %{y:.2f} km<br>"
+                    "Depth: %{z:.2f} km<br>"
+                    "Longitude: %{customdata[0]:.5f}<br>"
+                    "Latitude: %{customdata[1]:.5f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        # Fitted finite surface
+        if cid not in surface_meshes:
+            continue
+
+        mesh = surface_meshes[cid]
+        triangles = np.asarray(mesh["triangles"])
+
+        x_surface, y_surface = lonlat_to_local_km(
+            mesh["lon"],
+            mesh["lat"],
+            lon_ref,
+            lat_ref,
+        )
+
+        fig_interactive.add_trace(
+            go.Mesh3d(
+                x=x_surface,
+                y=y_surface,
+                z=mesh["depth"],
+                i=triangles[:, 0],
+                j=triangles[:, 1],
+                k=triangles[:, 2],
+                name=f"Cluster {cid}: {model_name}",
+                legendgroup=f"cluster_{cid}",
+                color=cluster_color,
+                opacity=0.50,
+                flatshading=False,
+                lighting=dict(
+                    ambient=0.55,
+                    diffuse=0.85,
+                    specular=0.25,
+                    roughness=0.60,
+                    fresnel=0.10,
+                ),
+                lightposition=dict(
+                    x=100,
+                    y=100,
+                    z=-100,
+                ),
+                hovertemplate=(
+                    f"<b>Cluster {cid}</b><br>"
+                    f"Model: {model_name}<br>"
+                    f"CV RMSE: {cv_rmse:.3f} km<br>"
+                    "East: %{x:.2f} km<br>"
+                    "North: %{y:.2f} km<br>"
+                    "Depth: %{z:.2f} km"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        # Surface label at its centroid
+        if cid in surface_fits:
+            centroid = surface_fits[cid]["centroid"]
+
+            fig_interactive.add_trace(
+                go.Scatter3d(
+                    x=[centroid[0]],
+                    y=[centroid[1]],
+                    z=[centroid[2]],
+                    mode="text",
+                    text=[
+                        (
+                            f"C{cid}<br>"
+                            f"{model_name}<br>"
+                            f"RMSE = {cv_rmse:.2f} km"
+                        )
+                    ],
+                    textposition="middle center",
+                    textfont=dict(
+                        size=12,
+                        color="black",
+                    ),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+    fig_interactive.update_layout(
+        title=(
+            "Interactive 3D View of DBSCAN Clusters "
+            "and Best-Fitting Surfaces"
+        ),
+        width=1050,
+        height=850,
+        margin=dict(
+            l=10,
+            r=10,
+            b=10,
+            t=60,
+        ),
+        legend=dict(
+            title="Clusters and models",
+            x=0.01,
+            y=0.99,
+        ),
+        scene=dict(
+            xaxis=dict(
+                title="East (km)",
+                showbackground=True,
+            ),
+            yaxis=dict(
+                title="North (km)",
+                showbackground=True,
+            ),
+            zaxis=dict(
+                title="Depth (km)",
+                autorange="reversed",
+                showbackground=True,
+            ),
+
+            # Same physical scale for East, North, and depth.
+            aspectmode="data",
+
+            camera=dict(
+                eye=dict(
+                    x=1.6,
+                    y=1.6,
+                    z=0.8,
+                )
+            ),
+        ),
+    )
+
+    return fig_interactive
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -7360,6 +8405,22 @@ __all__ = [
     "compute_counts_per_bin",
     "plot_three_catalog_overview_pretty",
     "get_common_bounds_for_two_catalogs",
+    "lonlat_to_local_km",
+    "local_km_to_lonlat",
+    "dbscan_parameter_scan",
+    "select_best_dbscan",
+    "dbscan_cluster_table",
+    "select_cluster_ids",
+    "fit_best_surface_pca",
+    "make_fitted_surface_mesh",
+    "plane_dip_deg",
+    "plane_dip_direction_deg",
+    "surface_fit_orientation",
+    "fit_cluster_surfaces",
+    "cluster_style_map",
+    "plot_cluster_surfaces_3d",
+    "plot_cluster_surfaces_interactive",
+    "CLUSTER_STYLES",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
