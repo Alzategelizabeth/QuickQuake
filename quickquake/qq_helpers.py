@@ -4872,6 +4872,7 @@ __all__ = [
     "normalize_picks",
     "normalize_stations_for_waveforms",
     "filter_catalog_time",
+    "filter_catalog_by_radius",
     "make_quakes_for_map",
     "make_stations_wide_for_map",
     "WaveformIndex",
