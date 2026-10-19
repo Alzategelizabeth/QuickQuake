@@ -270,6 +270,55 @@ def filter_catalog_time(
     return df.loc[m].copy()
 
 
+def filter_catalog_by_radius(
+    catalog,
+    center_lat,
+    center_lon,
+    radius_km,
+    lat_col="latitude",
+    lon_col="longitude",
+    distance_col="r_km",
+):
+    """
+    Keep the events whose horizontal distance to (center_lat, center_lon) is <= radius_km.
+
+    Distance is the great-circle distance on the WGS84 ellipsoid (ObsPy
+    gps2dist_azimuth), in km; depth is ignored. The distance of each kept event
+    is stored in `distance_col` (km). Rows with missing coordinates are dropped.
+    Example: filter_catalog_by_radius(cat, 56.9058, -158.209, 20.0) keeps the
+    events within 20 km of Aniakchak.
+    """
+    from obspy.geodetics.base import gps2dist_azimuth
+
+    if radius_km <= 0:
+        raise ValueError("radius_km must be greater than zero.")
+
+    df = catalog.copy()
+
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+
+    # gps2dist_azimuth returns (distance in m, azimuth, back azimuth)
+    df[distance_col] = [
+        gps2dist_azimuth(
+            latitude,
+            longitude,
+            center_lat,
+            center_lon,
+        )[0] / 1000.0
+        for latitude, longitude in zip(
+            df[lat_col],
+            df[lon_col],
+        )
+    ]
+
+    df = df[df[distance_col] <= radius_km].copy()
+
+    return df.reset_index(drop=True)
+
+
 def make_quakes_for_map(
     catalog: pd.DataFrame,
     start,
