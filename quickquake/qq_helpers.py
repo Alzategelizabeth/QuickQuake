@@ -3870,6 +3870,1062 @@ def plot_monthly_fi_span_legend_only(
 
 
 # ============================================================
+# CATALOG COMPARISON WITH REFERENCE CATALOGS (e.g. USGS, AVO)
+# ============================================================
+
+def load_and_normalize(filepath, column_mapping, depth_in_meters=False, **kwargs):
+    """
+    Read a catalog CSV and give it the standard comparison columns:
+    time (UTC), latitude, longitude, depth_km, mag, event_id (as text).
+
+    column_mapping renames the file's columns, e.g. {"depth(m)": "depth_km",
+    "magnitude": "mag"}; depth_in_meters=True divides depth by 1000.
+    Rows without time, coordinates or depth are dropped; sorted by time.
+    """
+    df = pd.read_csv(filepath, **kwargs)
+
+    rename_dict = {k: v for k, v in column_mapping.items() if k in df.columns}
+    df = df.rename(columns=rename_dict).copy()
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
+    required = ["time", "latitude", "longitude", "depth_km", "mag", "event_id"]
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Missing required columns after renaming: {missing}\n"
+            f"Available columns: {list(df.columns)}\n"
+            f"Column mapping: {column_mapping}"
+        )
+
+    # format="mixed": catalogs mix "...:08.61+00:00" and "...:46+00:00" time strings
+    df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce", format="mixed")
+
+    for col in ["latitude", "longitude", "depth_km", "mag"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if depth_in_meters:
+        df["depth_km"] = df["depth_km"] / 1000.0
+
+    df["event_id"] = df["event_id"].astype(str)
+    df = df.dropna(subset=["time", "latitude", "longitude", "depth_km"]).copy()
+    df = df[required].copy()
+    df = df.sort_values("time").reset_index(drop=True)
+
+    return df
+
+
+def filter_catalog_by_year(df, year):
+    """Events of one calendar year (UTC), sorted by time."""
+    out = df[df["time"].dt.year == year].copy()
+    return out.sort_values("time").reset_index(drop=True)
+
+
+def obspy_horizontal_distance_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km on the WGS84 ellipsoid (ObsPy gps2dist_azimuth)."""
+    from obspy.geodetics.base import gps2dist_azimuth
+
+    dist_m, _, _ = gps2dist_azimuth(lat1, lon1, lat2, lon2)
+    return dist_m / 1000.0
+
+
+def obspy_distance_3d_km(lat1, lon1, depth1_km, lat2, lon2, depth2_km):
+    """
+    (dh_km, dz_km, d3_km): horizontal distance, depth difference (point 2 - point 1,
+    positive = point 2 deeper) and their combination sqrt(dh^2 + dz^2), all in km.
+    """
+    dh_km = obspy_horizontal_distance_km(lat1, lon1, lat2, lon2)
+    dz_km = depth2_km - depth1_km
+    d3_km = np.sqrt(dh_km**2 + dz_km**2)
+    return dh_km, dz_km, d3_km
+
+
+def match_catalogs_time_space(ref_df, qry_df, time_tol_s, dist_tol_km):
+    """
+    All candidate pairs between a reference catalog (e.g. USGS) and a query catalog
+    (e.g. QuickQuake): |origin-time difference| <= time_tol_s (s) and 3-D distance
+    <= dist_tol_km (km). Each pair gets score = |dt|/time_tol_s + d3/dist_tol_km
+    (lower = better). dt_sec and dz_km are query - reference.
+    One reference event can have several candidates; see enforce_one_to_one.
+    """
+    ref = ref_df.sort_values("time").reset_index(drop=True).copy()
+    qry = qry_df.sort_values("time").reset_index(drop=True).copy()
+
+    rows = []
+
+    for _, ref_row in ref.iterrows():
+        t0 = ref_row["time"] - pd.Timedelta(seconds=time_tol_s)
+        t1 = ref_row["time"] + pd.Timedelta(seconds=time_tol_s)
+
+        cand = qry[(qry["time"] >= t0) & (qry["time"] <= t1)].copy()
+        if cand.empty:
+            continue
+
+        cand["dt_sec"] = (cand["time"] - ref_row["time"]).dt.total_seconds()
+        cand["abs_dt_sec"] = cand["dt_sec"].abs()
+
+        dh_list, dz_list, d3_list = [], [], []
+        for _, qrow in cand.iterrows():
+            dh_km, dz_km, d3_km = obspy_distance_3d_km(
+                ref_row["latitude"], ref_row["longitude"], ref_row["depth_km"],
+                qrow["latitude"], qrow["longitude"], qrow["depth_km"],
+            )
+            dh_list.append(dh_km)
+            dz_list.append(dz_km)
+            d3_list.append(d3_km)
+
+        cand["dh_km"] = dh_list
+        cand["dz_km"] = dz_list
+        cand["d3_km"] = d3_list
+        cand = cand[cand["d3_km"] <= dist_tol_km].copy()
+
+        if cand.empty:
+            continue
+
+        cand["score"] = (
+            cand["abs_dt_sec"] / time_tol_s +
+            cand["d3_km"] / dist_tol_km
+        )
+
+        for _, qrow in cand.iterrows():
+            row = {f"{col}_ref": ref_row[col] for col in ref.columns}
+            row.update({f"{col}_qry": qrow[col] for col in qry.columns})
+            row["dt_sec"] = qrow["dt_sec"]
+            row["abs_dt_sec"] = qrow["abs_dt_sec"]
+            row["dh_km"] = qrow["dh_km"]
+            row["dz_km"] = qrow["dz_km"]
+            row["d3_km"] = qrow["d3_km"]
+            row["score"] = qrow["score"]
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def enforce_one_to_one(matched_candidates):
+    """
+    Keep at most one partner per event, preferring the lowest score: first the
+    best candidate of each reference event, then the best of each query event.
+    This is a greedy choice: a reference event whose best partner was taken by
+    another event is not re-paired with its second-best candidate.
+    """
+    if matched_candidates.empty:
+        return matched_candidates.copy()
+
+    out = matched_candidates.sort_values("score").drop_duplicates(
+        subset=["event_id_ref"], keep="first"
+    )
+    out = out.sort_values("score").drop_duplicates(
+        subset=["event_id_qry"], keep="first"
+    )
+    return out.sort_values("time_ref").reset_index(drop=True)
+
+
+def check_one_to_one(matched_df, comparison_name="comparison"):
+    """Print how many matches there are and whether any event appears twice."""
+    n_total = len(matched_df)
+    n_dup_ref = matched_df["event_id_ref"].duplicated().sum()
+    n_dup_qry = matched_df["event_id_qry"].duplicated().sum()
+
+    print(comparison_name)
+    print(f"  total matches: {n_total}")
+    print(f"  duplicate reference events: {n_dup_ref}")
+    print(f"  duplicate query events: {n_dup_qry}")
+
+    if n_dup_ref == 0 and n_dup_qry == 0:
+        print("  one-to-one matching confirmed")
+    else:
+        print("  duplicates still present")
+
+
+def compute_residuals(matched_df):
+    """
+    Recompute dh_km, dz_km, d3_km for each matched pair and add dmag = mag_qry - mag_ref.
+    """
+    out = matched_df.copy()
+
+    dh_list, dz_list, d3_list = [], [], []
+    for _, row in out.iterrows():
+        dh_km, dz_km, d3_km = obspy_distance_3d_km(
+            row["latitude_ref"], row["longitude_ref"], row["depth_km_ref"],
+            row["latitude_qry"], row["longitude_qry"], row["depth_km_qry"],
+        )
+        dh_list.append(dh_km)
+        dz_list.append(dz_km)
+        d3_list.append(d3_km)
+
+    out["dh_km"] = dh_list
+    out["dz_km"] = dz_list
+    out["d3_km"] = d3_list
+    out["dmag"] = out["mag_qry"] - out["mag_ref"]
+    return out
+
+
+def calculate_pair_metrics(matched_df, n_ref_buffer, n_qry_buffer):
+    """
+    Summary of one comparison: number of matches, recall of the reference catalog
+    (matches / reference events), fraction of the query catalog matched, and
+    mean / std / median / 90th percentile of dt (s), d3 and dz (km) and dmag.
+    """
+    n_matches = len(matched_df)
+
+    if n_matches == 0:
+        return {
+            "n_ref_buffer": n_ref_buffer,
+            "n_qry_buffer": n_qry_buffer,
+            "n_matches": 0,
+            "recall_ref": np.nan,
+            "matched_fraction_qry": np.nan,
+            "dt_mean": np.nan,
+            "dt_std": np.nan,
+            "dt_median_abs": np.nan,
+            "dt_p90_abs": np.nan,
+            "d3_mean": np.nan,
+            "d3_std": np.nan,
+            "d3_median": np.nan,
+            "d3_p90": np.nan,
+            "dz_mean": np.nan,
+            "dz_std": np.nan,
+            "dmag_mean": np.nan,
+            "dmag_std": np.nan,
+        }
+
+    return {
+        "n_ref_buffer": n_ref_buffer,
+        "n_qry_buffer": n_qry_buffer,
+        "n_matches": n_matches,
+        "recall_ref": n_matches / n_ref_buffer if n_ref_buffer > 0 else np.nan,
+        "matched_fraction_qry": n_matches / n_qry_buffer if n_qry_buffer > 0 else np.nan,
+        "dt_mean": matched_df["dt_sec"].mean(),
+        "dt_std": matched_df["dt_sec"].std(),
+        "dt_median_abs": matched_df["dt_sec"].abs().median(),
+        "dt_p90_abs": matched_df["dt_sec"].abs().quantile(0.90),
+        "d3_mean": matched_df["d3_km"].mean(),
+        "d3_std": matched_df["d3_km"].std(),
+        "d3_median": matched_df["d3_km"].median(),
+        "d3_p90": matched_df["d3_km"].quantile(0.90),
+        "dz_mean": matched_df["dz_km"].mean(),
+        "dz_std": matched_df["dz_km"].std(),
+        "dmag_mean": matched_df["dmag"].mean(),
+        "dmag_std": matched_df["dmag"].std(),
+    }
+
+
+def run_all_comparisons(catalog_buf, comparisons, catalogs, params, verbose=True):
+    """
+    Match every (reference, query) pair listed in comparisons, e.g.
+    {"ref": "usgs", "qry": "qq", "name": "QuickQuake vs USGS"}, using
+    params["time_tol_s"] (s) and params["dist_tol_km"] (km).
+    catalog_buf: {key: catalog} already cut to the same area and time window.
+    Returns {(ref_key, qry_key): {"name", "ref_label", "qry_label", "matches", "metrics", ...}}.
+    """
+    pair_results = {}
+
+    for cfg in comparisons:
+        ref_key = cfg["ref"]
+        qry_key = cfg["qry"]
+        comparison_name = cfg["name"]
+
+        ref_df = catalog_buf[ref_key].copy()
+        qry_df = catalog_buf[qry_key].copy()
+
+        matched_candidates = match_catalogs_time_space(
+            ref_df,
+            qry_df,
+            time_tol_s=params["time_tol_s"],
+            dist_tol_km=params["dist_tol_km"],
+        )
+        matched_df = enforce_one_to_one(matched_candidates)
+        matched_df = compute_residuals(matched_df)
+
+        metrics = calculate_pair_metrics(
+            matched_df,
+            n_ref_buffer=len(ref_df),
+            n_qry_buffer=len(qry_df),
+        )
+
+        pair_results[(ref_key, qry_key)] = {
+            "name": comparison_name,
+            "ref_key": ref_key,
+            "qry_key": qry_key,
+            "ref_label": catalogs[ref_key]["label"],
+            "qry_label": catalogs[qry_key]["label"],
+            "matches": matched_df,
+            "metrics": metrics,
+        }
+
+        if verbose:
+            print(f"\n{comparison_name}")
+            print(f"  total matches: {len(matched_df)}")
+            print(f"  duplicate reference events: {matched_df['event_id_ref'].duplicated().sum()}")
+            print(f"  duplicate query events: {matched_df['event_id_qry'].duplicated().sum()}")
+
+    return pair_results
+
+
+def build_metrics_table(pair_results):
+    """One row per comparison with readable column names and units (rounded to 3 decimals)."""
+    rows = []
+
+    for result in pair_results.values():
+        row = {
+            "Comparison": result["name"],
+            "Reference catalog": result["ref_label"],
+            "Query catalog": result["qry_label"],
+            **result["metrics"],
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    df = df.rename(columns={
+        "n_ref_buffer": "N in reference buffer",
+        "n_qry_buffer": "N in query buffer",
+        "n_matches": "One-to-one matches",
+        "recall_ref": "Recall of reference by query",
+        "matched_fraction_qry": "Fraction of query matched",
+        "dt_mean": "Mean Δt (s)",
+        "dt_std": "Std Δt (s)",
+        "dt_median_abs": "Median |Δt| (s)",
+        "dt_p90_abs": "P90 |Δt| (s)",
+        "d3_mean": "Mean d3 (km)",
+        "d3_std": "Std d3 (km)",
+        "d3_median": "Median d3 (km)",
+        "d3_p90": "P90 d3 (km)",
+        "dz_mean": "Mean Δz (km)",
+        "dz_std": "Std Δz (km)",
+        "dmag_mean": "Mean Δm",
+        "dmag_std": "Std Δm",
+    })
+
+    cols_order = [
+        "Comparison",
+        "Reference catalog",
+        "Query catalog",
+        "N in reference buffer",
+        "N in query buffer",
+        "One-to-one matches",
+        "Recall of reference by query",
+        "Fraction of query matched",
+        "Mean d3 (km)",
+        "Std d3 (km)",
+        "Median d3 (km)",
+        "P90 d3 (km)",
+        "Mean Δt (s)",
+        "Std Δt (s)",
+        "Median |Δt| (s)",
+        "P90 |Δt| (s)",
+        "Mean Δz (km)",
+        "Std Δz (km)",
+        "Mean Δm",
+        "Std Δm",
+    ]
+
+    df = df[cols_order]
+
+    for col in df.columns:
+        if col not in ["Comparison", "Reference catalog", "Query catalog"]:
+            df[col] = df[col].astype(float).round(3)
+
+    return df
+
+
+def add_component_residuals_km(matched_df):
+    """
+    Signed residuals, query - reference: dx_km (east-west), dy_km (north-south),
+    dz_km (depth, positive = query deeper) and dt_sec. dx/dy use a local
+    conversion of 111.32 km per degree (dx scaled by cos of the mean latitude).
+    """
+    out = matched_df.copy()
+
+    # Signed geographic residuals: query - reference
+    out["dlon_deg"] = out["longitude_qry"] - out["longitude_ref"]
+    out["dlat_deg"] = out["latitude_qry"] - out["latitude_ref"]
+    out["dz_km"] = out["depth_km_qry"] - out["depth_km_ref"]
+
+    if "dt_sec" not in out.columns:
+        out["dt_sec"] = (
+            pd.to_datetime(out["time_qry"], utc=True) -
+            pd.to_datetime(out["time_ref"], utc=True)
+        ).dt.total_seconds()
+
+    # Local conversion to signed km components
+    mean_lat_rad = np.deg2rad(0.5 * (out["latitude_ref"] + out["latitude_qry"]))
+    out["dy_km"] = 111.32 * out["dlat_deg"]
+    out["dx_km"] = 111.32 * np.cos(mean_lat_rad) * out["dlon_deg"]
+
+    return out
+
+
+def build_km_component_metrics_table(matched_df):
+    """Mean, std and median of dx, dy, dz (km) and dt (s) for one comparison."""
+    df = add_component_residuals_km(matched_df)
+
+    rows = [
+        {
+            "Metric": "Δx east-west (km)",
+            "Mean": df["dx_km"].mean(),
+            "Std": df["dx_km"].std(),
+            "Median": df["dx_km"].median(),
+        },
+        {
+            "Metric": "Δy north-south (km)",
+            "Mean": df["dy_km"].mean(),
+            "Std": df["dy_km"].std(),
+            "Median": df["dy_km"].median(),
+        },
+        {
+            "Metric": "Δz depth (km)",
+            "Mean": df["dz_km"].mean(),
+            "Std": df["dz_km"].std(),
+            "Median": df["dz_km"].median(),
+        },
+        {
+            "Metric": "Δt (s)",
+            "Mean": df["dt_sec"].mean(),
+            "Std": df["dt_sec"].std(),
+            "Median": df["dt_sec"].median(),
+        },
+    ]
+
+    table = pd.DataFrame(rows)
+    for col in ["Mean", "Std", "Median"]:
+        table[col] = table[col].round(5)
+
+    return table
+
+
+def make_residual_summary_tables(residual_data, decimals=3):
+    """
+    Creates manuscript-friendly summary tables for QuickQuake residuals
+    relative to USGS and AVO.
+
+    Uses residual_data returned by:
+        fig, axes, residual_data = plot_combined_reference_residual_histograms(...)
+    """
+
+    component_info = {
+        "dx_km": {
+            "label": r"$\Delta x$",
+            "meaning": "east-west",
+            "unit": "km",
+        },
+        "dy_km": {
+            "label": r"$\Delta y$",
+            "meaning": "north-south",
+            "unit": "km",
+        },
+        "dz_km": {
+            "label": r"$\Delta z$",
+            "meaning": "depth",
+            "unit": "km",
+        },
+        "dt_sec": {
+            "label": r"$\Delta t$",
+            "meaning": "origin time",
+            "unit": "s",
+        },
+    }
+
+    rows = []
+
+    for pair_key, item in residual_data.items():
+        reference = item["cfg"]["label"]
+        df = item["df"].copy()
+
+        for col, info in component_info.items():
+            vals = pd.to_numeric(df[col], errors="coerce").dropna().to_numpy(dtype=float)
+            vals = vals[np.isfinite(vals)]
+
+            if len(vals) == 0:
+                continue
+
+            rows.append({
+                "Reference catalog": reference,
+                "Residual": info["label"],
+                "Component": info["meaning"],
+                "Unit": info["unit"],
+                "N": len(vals),
+                "Median": np.median(vals),
+                "Mean": np.mean(vals),
+                "Std. dev.": np.std(vals, ddof=1) if len(vals) > 1 else np.nan,
+                "16th perc.": np.percentile(vals, 16),
+                "84th perc.": np.percentile(vals, 84),
+                "5th perc.": np.percentile(vals, 5),
+                "95th perc.": np.percentile(vals, 95),
+                "Median absolute residual": np.median(np.abs(vals)),
+                "95th perc. absolute residual": np.percentile(np.abs(vals), 95),
+            })
+
+    component_table = pd.DataFrame(rows)
+
+    # Round numerical columns
+    num_cols = component_table.select_dtypes(include=[np.number]).columns
+    component_table[num_cols] = component_table[num_cols].round(decimals)
+
+    # ------------------------------------------------------------------
+    # Compact paragraph-ready table
+    # ------------------------------------------------------------------
+    paragraph_rows = []
+
+    for pair_key, item in residual_data.items():
+        reference = item["cfg"]["label"]
+        df = item["df"].copy()
+
+        for col in ["dx_km", "dy_km", "dz_km", "dt_sec"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        clean = df[["dx_km", "dy_km", "dz_km", "dt_sec"]].dropna()
+
+        horizontal_offset = np.sqrt(clean["dx_km"]**2 + clean["dy_km"]**2)
+
+        paragraph_rows.append({
+            "Reference catalog": reference,
+            "N matched events": len(clean),
+            "Median Δx (km)": np.median(clean["dx_km"]),
+            "Median Δy (km)": np.median(clean["dy_km"]),
+            "Median Δz (km)": np.median(clean["dz_km"]),
+            "Median Δt (s)": np.median(clean["dt_sec"]),
+            "Median horizontal offset (km)": np.median(horizontal_offset),
+            "Median |Δz| (km)": np.median(np.abs(clean["dz_km"])),
+            "Median |Δt| (s)": np.median(np.abs(clean["dt_sec"])),
+            "95th perc. horizontal offset (km)": np.percentile(horizontal_offset, 95),
+            "95th perc. |Δz| (km)": np.percentile(np.abs(clean["dz_km"]), 95),
+            "95th perc. |Δt| (s)": np.percentile(np.abs(clean["dt_sec"]), 95),
+        })
+
+    paragraph_table = pd.DataFrame(paragraph_rows)
+
+    num_cols = paragraph_table.select_dtypes(include=[np.number]).columns
+    paragraph_table[num_cols] = paragraph_table[num_cols].round(decimals)
+
+    return component_table, paragraph_table
+
+
+def plot_match_histograms(matched_df, comparison_name, save_path=None, show=True):
+    import matplotlib.pyplot as plt
+
+    if matched_df is None or len(matched_df) == 0:
+        print(f"No matches for {comparison_name}")
+        return
+
+    # Compact figure so the text looks larger
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+
+    color_d3 = "#4C78A8"
+    color_dt = "#F58518"
+    line_med = "#222222"
+
+    # Font sizes
+    label_fs = 13
+    tick_fs = 11
+    title_fs = 14
+    box_fs = 11
+    suptitle_fs = 15
+
+    # -------------------------
+    # (a) 3-D distance
+    # -------------------------
+    ax = axes[0]
+    ax.hist(
+        matched_df["d3_km"],
+        bins=30,
+        color=color_d3,
+        alpha=0.85,
+        edgecolor="white",
+        linewidth=0.8
+    )
+
+    d3_med = matched_df["d3_km"].median()
+
+    ax.axvline(d3_med, color=line_med, linestyle="--", linewidth=1.8)
+
+    ax.text(
+        0.97, 0.95,
+        f"n = {len(matched_df)}\nMedian = {d3_med:.2f} km",
+        transform=ax.transAxes,
+        ha="right", va="top",
+        fontsize=box_fs,
+        bbox=dict(
+            boxstyle="round,pad=0.3",
+            facecolor="white",
+            edgecolor="0.85",
+            alpha=0.95
+        )
+    )
+
+    ax.set_xlabel("Distance (km)", fontsize=label_fs)
+    ax.set_ylabel("Count", fontsize=label_fs)
+    ax.set_title("(a) Distance", loc="left", fontsize=title_fs, fontweight="bold")
+    ax.grid(axis="y", alpha=0.20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=tick_fs)
+
+    # -------------------------
+    # (b) Time residual
+    # -------------------------
+    ax = axes[1]
+    ax.hist(
+        matched_df["dt_sec"],
+        bins=30,
+        color=color_dt,
+        alpha=0.85,
+        edgecolor="white",
+        linewidth=0.8
+    )
+
+    dt_med = matched_df["dt_sec"].median()
+
+    ax.axvline(dt_med, color=line_med, linestyle="--", linewidth=1.8)
+
+    ax.text(
+        0.97, 0.95,
+        f"n = {len(matched_df)}\nMedian = {dt_med:.2f} s",
+        transform=ax.transAxes,
+        ha="right", va="top",
+        fontsize=box_fs,
+        bbox=dict(
+            boxstyle="round,pad=0.3",
+            facecolor="white",
+            edgecolor="0.85",
+            alpha=0.95
+        )
+    )
+
+    ax.set_xlabel("Time residual Δt (s)", fontsize=label_fs)
+    ax.set_ylabel("Count", fontsize=label_fs)
+    ax.set_title("(b) Time", loc="left", fontsize=title_fs, fontweight="bold")
+    ax.grid(axis="y", alpha=0.20)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=tick_fs)
+
+    fig.suptitle(comparison_name, fontsize=suptitle_fs, y=0.99)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def plot_match_km_histograms(
+    matched_df,
+    comparison_name,
+    save_path=None,
+    bins=30,
+    show=True,
+):
+    import matplotlib.pyplot as plt
+
+    if matched_df is None or len(matched_df) == 0:
+        print(f"No matches for {comparison_name}")
+        return
+
+    df = add_component_residuals_km(matched_df)
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+
+    specs = [
+        ("dx_km",  "Δx east-west (km)",   "#4C78A8", "(a)"),
+        ("dy_km",  "Δy north-south (km)", "#F58518", "(b)"),
+        ("dz_km",  "Δz depth (km)",       "#54A24B", "(c)"),
+        ("dt_sec", "Δt (s)",              "#B279A2", "(d)"),
+    ]
+
+    for ax, (col, xlabel, color, panel) in zip(axes.flat, specs):
+        vals = df[col].dropna()
+
+        ax.hist(
+            vals,
+            bins=bins,
+            color=color,
+            alpha=0.85,
+            edgecolor="white",
+            linewidth=0.8,
+        )
+
+        mean = vals.mean()
+        med = vals.median()
+
+        ax.axvline(mean, color="#C44E52", linestyle="-", linewidth=1.8, label="Mean")
+        ax.axvline(med, color="#222222", linestyle="--", linewidth=1.8, label="Median")
+
+        units = "s" if col == "dt_sec" else "km"
+        ax.text(
+            0.97, 0.95,
+            f"n = {len(vals)}\nMean = {mean:.3f} {units}\nMedian = {med:.3f} {units}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10,
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="0.85",
+                alpha=0.95,
+            ),
+        )
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Count")
+        ax.set_title(panel, loc="left", fontsize=14, fontweight="bold")
+        ax.legend(frameon=False, loc="upper left")
+        ax.grid(axis="y", alpha=0.20)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle(comparison_name, y=0.98, fontsize=15)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def plot_match_km_scatter(
+    matched_df,
+    comparison_name,
+    save_path=None,
+    show=True,
+):
+    import matplotlib.pyplot as plt
+
+    if matched_df is None or len(matched_df) == 0:
+        print(f"No matches for {comparison_name}")
+        return
+
+    df = add_component_residuals_km(matched_df)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+
+    axes[0].scatter(df["dx_km"], df["dy_km"], s=12, alpha=0.35, edgecolors="none")
+    axes[0].axhline(0, color="0.3", lw=1)
+    axes[0].axvline(0, color="0.3", lw=1)
+    axes[0].set_xlabel("Δx east-west (km)")
+    axes[0].set_ylabel("Δy north-south (km)")
+    axes[0].set_title("(a)", loc="left", fontweight="bold")
+
+    axes[1].scatter(df["dx_km"], df["dz_km"], s=12, alpha=0.35, edgecolors="none")
+    axes[1].axhline(0, color="0.3", lw=1)
+    axes[1].axvline(0, color="0.3", lw=1)
+    axes[1].set_xlabel("Δx east-west (km)")
+    axes[1].set_ylabel("Δz depth (km)")
+    axes[1].set_title("(b)", loc="left", fontweight="bold")
+
+    axes[2].scatter(df["dy_km"], df["dz_km"], s=12, alpha=0.35, edgecolors="none")
+    axes[2].axhline(0, color="0.3", lw=1)
+    axes[2].axvline(0, color="0.3", lw=1)
+    axes[2].set_xlabel("Δy north-south (km)")
+    axes[2].set_ylabel("Δz depth (km)")
+    axes[2].set_title("(c)", loc="left", fontweight="bold")
+
+    for ax in axes:
+        ax.grid(alpha=0.20)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle(comparison_name, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def plot_combined_reference_residual_histograms(
+    pair_results,
+    save_path=None,
+    bins=32,
+    use_density=False,
+    spatial_plot_limit_km=8.0,
+    time_plot_limit_s=2.0,
+    show=True,
+):
+    """
+    Plot one combined manuscript-ready residual histogram figure comparing:
+
+        QuickQuake vs USGS
+        QuickQuake vs AVO
+
+    The function expects:
+        pair_results[("usgs", "qq")]["matches"]
+        pair_results[("avo", "qq")]["matches"]
+
+    It also expects that add_component_residuals_km(matched_df) already exists
+    and creates:
+        dx_km, dy_km, dz_km, dt_sec
+
+    Sign convention:
+        residual = query - reference
+
+        dx_km > 0: QuickQuake event is farther east than reference
+        dy_km > 0: QuickQuake event is farther north than reference
+        dz_km > 0: QuickQuake event is deeper than reference
+        dt_sec > 0: QuickQuake event is later than reference
+    """
+    import matplotlib.pyplot as plt
+
+
+    required_pairs = [
+        {
+            "key": ("usgs", "qq"),
+            "label": "USGS",
+            "short_label": "USGS",
+            "color": "#1f77b4",   # blue
+            "linestyle": "-",
+        },
+        {
+            "key": ("avo", "qq"),
+            "label": "AVO",
+            "short_label": "AVO",
+            "color": "#ff7f0e",   # orange
+            "linestyle": "-",
+        },
+    ]
+
+    # ------------------------------------------------------------------
+    # Extract and compute signed residual components
+    # ------------------------------------------------------------------
+    residual_data = {}
+
+    for cfg in required_pairs:
+        pair_key = cfg["key"]
+
+        if pair_key not in pair_results:
+            raise KeyError(
+                f"Missing pair_results[{pair_key}]. "
+                "Expected pair_results[(ref_key, qry_key)] with "
+                "('usgs', 'qq') and ('avo', 'qq')."
+            )
+
+        matched_df = pair_results[pair_key]["matches"]
+
+        if matched_df is None or len(matched_df) == 0:
+            raise ValueError(f"No matches found for pair_results[{pair_key}].")
+
+        df = add_component_residuals_km(matched_df).copy()
+
+        needed_cols = ["dx_km", "dy_km", "dz_km", "dt_sec"]
+        missing_cols = [col for col in needed_cols if col not in df.columns]
+        if missing_cols:
+            raise KeyError(
+                f"Missing residual columns after add_component_residuals_km(): {missing_cols}"
+            )
+
+        for col in needed_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        residual_data[pair_key] = {
+            "cfg": cfg,
+            "df": df,
+        }
+
+    # ------------------------------------------------------------------
+    # Figure style
+    # ------------------------------------------------------------------
+    old_rc = plt.rcParams.copy()
+
+    plt.rcParams.update({
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+        "font.family": "DejaVu Sans",
+        "font.size": 9,
+        "axes.titlesize": 10,
+        "axes.labelsize": 9.5,
+        "xtick.labelsize": 8.5,
+        "ytick.labelsize": 8.5,
+        "legend.fontsize": 8.5,
+        "axes.linewidth": 0.8,
+        "xtick.major.width": 0.8,
+        "ytick.major.width": 0.8,
+        "xtick.major.size": 3.0,
+        "ytick.major.size": 3.0,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    })
+    variables = [
+        {
+            "col": "dx_km",
+            "xlabel": r"$\Delta x$ east-west residual (km)",
+            "title": r"(a)",
+        },
+        {
+            "col": "dy_km",
+            "xlabel": r"$\Delta y$ north-south residual (km)",
+            "title": r"(b)",
+        },
+        {
+            "col": "dz_km",
+            "xlabel": r"$\Delta z$ depth residual (km)",
+            "title": r"(c)",
+        },
+        {
+            "col": "dt_sec",
+            "xlabel": r"$\Delta t$ time residual (s)",
+            "title": r"(d)",
+        },
+    ]
+
+    try:
+        fig, axes = plt.subplots(
+            2,
+            2,
+            figsize=(7.2, 5.6),
+            constrained_layout=False,
+        )
+
+        axes = axes.ravel()
+
+        for ax, spec in zip(axes, variables):
+            col = spec["col"]
+
+            vals_by_pair = {}
+            combined_vals = []
+
+            for pair_key, item in residual_data.items():
+                vals = item["df"][col].dropna().to_numpy(dtype=float)
+                vals = vals[np.isfinite(vals)]
+                vals_by_pair[pair_key] = vals
+                combined_vals.append(vals)
+
+            combined_vals = np.concatenate(combined_vals)
+
+            if len(combined_vals) == 0:
+                ax.set_visible(False)
+                continue
+
+            # ----------------------------------------------------------
+            # Fixed symmetric plotting limits:
+            #   dx, dy, dz: -8 to 8 km
+            #   dt:        -2 to 2 s
+            # ----------------------------------------------------------
+            if col == "dt_sec":
+                max_abs = time_plot_limit_s
+            else:
+                max_abs = spatial_plot_limit_km
+
+            bin_edges = np.linspace(-max_abs, max_abs, bins + 1)
+
+            # ----------------------------------------------------------
+            # Histograms
+            # ----------------------------------------------------------
+            for pair_key, item in residual_data.items():
+                cfg = item["cfg"]
+                vals = vals_by_pair[pair_key]
+
+                ax.hist(
+                    vals,
+                    bins=bin_edges,
+                    histtype="step",
+                    linewidth=1.45,
+                    color=cfg["color"],
+                    linestyle=cfg["linestyle"],
+                    label=cfg["label"],
+                    density=use_density,
+                )
+
+            # Force x-axis limits
+            if col == "dt_sec":
+                ax.set_xlim(-time_plot_limit_s, time_plot_limit_s)
+            else:
+                ax.set_xlim(-spatial_plot_limit_km, spatial_plot_limit_km)
+
+            # Zero residual line
+            ax.axvline(
+                0.0,
+                color="0.20",
+                linestyle="-",
+                linewidth=0.9,
+                alpha=0.85,
+                zorder=0,
+            )
+
+            # Formatting
+            ax.set_title(spec["title"], loc="left", fontweight="bold", pad=4)
+            ax.set_xlabel(spec["xlabel"])
+            ax.set_ylabel("Density" if use_density else "Count")
+
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_linewidth(0.8)
+            ax.spines["bottom"].set_linewidth(0.8)
+
+            ax.grid(
+                axis="y",
+                color="0.88",
+                linewidth=0.6,
+                linestyle="-",
+                alpha=0.7,
+            )
+            ax.grid(axis="x", visible=False)
+
+            ax.tick_params(axis="both", direction="out", width=0.8, length=3)
+
+        # ------------------------------------------------------------------
+        # One concise legend for the whole figure
+        # ------------------------------------------------------------------
+        legend_handles = []
+        legend_labels = []
+
+        for ax in axes:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                legend_handles = handles
+                legend_labels = labels
+                break
+
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.995),
+            ncol=2,
+            frameon=False,
+            handlelength=2.5,
+            columnspacing=1.5,
+        )
+
+        fig.tight_layout(rect=[0.02, 0.04, 1.0, 0.93])
+
+        # ------------------------------------------------------------------
+        # Save both PNG and PDF
+        # ------------------------------------------------------------------
+        if save_path is not None:
+            save_path = Path(save_path)
+
+            if save_path.suffix.lower() in [".png", ".pdf"]:
+                base = save_path.with_suffix("")
+            else:
+                base = save_path
+
+            png_path = base.with_suffix(".png")
+            pdf_path = base.with_suffix(".pdf")
+
+            fig.savefig(png_path, dpi=600, bbox_inches="tight")
+            fig.savefig(pdf_path, bbox_inches="tight")
+
+            print(f"Saved PNG: {png_path}")
+            print(f"Saved PDF: {pdf_path}")
+
+        if show:
+            plt.show()
+
+        return fig, axes, residual_data
+
+    finally:
+        plt.rcParams.update(old_rc)
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -5896,6 +6952,24 @@ __all__ = [
     "add_month_spans_inside_axis",
     "plot_fi_monthly_composition",
     "plot_monthly_fi_span_legend_only",
+    "load_and_normalize",
+    "filter_catalog_by_year",
+    "obspy_horizontal_distance_km",
+    "obspy_distance_3d_km",
+    "match_catalogs_time_space",
+    "enforce_one_to_one",
+    "check_one_to_one",
+    "compute_residuals",
+    "calculate_pair_metrics",
+    "run_all_comparisons",
+    "build_metrics_table",
+    "add_component_residuals_km",
+    "build_km_component_metrics_table",
+    "make_residual_summary_tables",
+    "plot_match_histograms",
+    "plot_match_km_histograms",
+    "plot_match_km_scatter",
+    "plot_combined_reference_residual_histograms",
     "animate_mapview3d_timecolor",
     "plot_regional_location_map",
     "plot_aniakchak_alaska_location",
