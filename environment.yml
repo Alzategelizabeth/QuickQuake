@@ -1,34 +1,49 @@
-name: QuickQuake
+# QuickQuake conda environment.
+# Versions below are the ones tested with this workflow (macOS and Linux, CPU only).
+#
+#   conda env create -f environment.yml      (or: mamba env create -f environment.yml)
+#
+# install.sh runs this for you and then installs PhaseNet, GaMMA and HypoXPy
+# from the dependencies/ folder.
+name: quickquake
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python=3.10
   - pip
 
-  # Core científico
-  - numpy=1.25.*
+  # Scientific core
+  - numpy=1.26
   - scipy
   - pandas
   - matplotlib
-  - scikit-learn
-  - obspy=1.4.0
+  - scikit-learn=1.2.2      # GaMMA's Gaussian mixture code requires this version
+  - obspy=1.5
   - pyproj
   - h5py
   - pyyaml
   - tqdm
   - requests
   - fsspec
+  - numba
 
   # PhaseNet (CPU)
-  - tensorflow=2.14.*=*cpu*
-  - tensorboard=2.14.*
+  - tensorflow=2.14
+  - keras=2.14
 
-  # Pip: SOLO lo imprescindible (sin seisgo/seisbench)
-  - pip:
-      - hypoinvpy==0.7.0
-      - hypoxpy==0.1.0
-      - pyasdf==0.8.1
-      - pycwt==0.4.0b0
-      - kneed==0.8.5
-      - plotly==6.0.1
+  # Compilers: install.sh uses them to build HypoInverse (hyp1.40), HypoDD and ph2dt
+  # from dependencies/HypoXPy and puts the programs in this environment
+  - gfortran
+  - c-compiler
+  - make
+
+  # Notebooks and maps (visualization.ipynb, catalog_visualization.ipynb, qc_inspection.ipynb, FI.ipynb)
+  - jupyterlab
+  - ipykernel
+  - cartopy
+  # 3D views. The elevation grid is read by qq_helpers.load_earth_relief with
+  # requests + pillow (no pygmt: GMT cannot be installed next to TensorFlow 2.14).
+  # plotly 7.0 and kaleido 1.3 are the newest versions for Python 3.10.
+  - pillow                  # opens the elevation tiles (JPEG2000 images)
+  - plotly=7.0              # interactive 3D figure
+  - python-kaleido=1.3      # saves plotly figures as SVG/PNG; needs Google Chrome

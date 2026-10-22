@@ -7,12 +7,13 @@ This code has been modified
 
 import os
 import json
+import time
 import argparse
 
 import numpy as np
 import pandas as pd
 from pyproj import Proj
-from gamma.utils import association
+from gamma.utils import association, estimate_eps
 
 
 def main():
@@ -34,6 +35,32 @@ def main():
         type=int,
         help="Oversample factor (e.g., 30 for BGMM, 1 for GMM). If not set, uses method default.",
     )
+
+    # DBSCAN pre-clustering + multiprocessing (off by default = original behavior)
+    parser.add_argument("--use_dbscan", action="store_true",
+                        help="Split picks into space-time clusters with DBSCAN and associate them in parallel")
+    parser.add_argument("--dbscan_eps", default="auto", type=str,
+                        help="DBSCAN eps in seconds, or 'auto' to estimate it from station spacing (default: auto)")
+    parser.add_argument("--dbscan_min_samples", default=3, type=int,
+                        help="DBSCAN min_samples (default: 3)")
+    parser.add_argument("--ncpu", default=None, type=int,
+                        help="Number of CPUs for association (default: GaMMA chooses, at most CPUs - 1)")
+
+    # Earth model and search space used by GaMMA (homogeneous velocities)
+    parser.add_argument("--vp", default=6.0, type=float,
+                        help="P-wave velocity in km/s used by GaMMA (default: 6.0)")
+    parser.add_argument("--vp_vs_ratio", default=1.73, type=float,
+                        help="Vp/Vs ratio used by GaMMA (default: 1.73)")
+    parser.add_argument("--depth_min_km", default=0.0, type=float,
+                        help="Shallowest event depth searched, in km (default: 0)")
+    parser.add_argument("--depth_max_km", default=60.0, type=float,
+                        help="Deepest event depth searched, in km (default: 60)")
+    parser.add_argument("--no_amplitude", action="store_true",
+                        help="Associate with arrival times only (default: times + amplitudes)")
+    parser.add_argument("--min_p_picks_per_eq", default=0, type=int,
+                        help="Minimum P picks per event (default: 0)")
+    parser.add_argument("--min_s_picks_per_eq", default=0, type=int,
+                        help="Minimum S picks per event (default: 0)")
 
     args = parser.parse_args()
 
@@ -71,8 +98,7 @@ def main():
         stations["z(km)"] = stations["elevation(m)"].apply(lambda x: -x / 1e3)
 
     # GaMMA configuration (base)
-    config["use_dbscan"] = False
-    config["use_amplitude"] = True
+    config["use_amplitude"] = not args.no_amplitude
 
     # --- user-facing overrides ---
     config["method"] = str(args.method).upper()
@@ -92,9 +118,9 @@ def main():
     else:
         config["oversample_factor"] = int(args.oversample_factor)
 
-    # Remaining fixed config (keep your existing values)
+    # Search space and velocities
     config["dims"] = ["x(km)", "y(km)", "z(km)"]
-    config["vel"] = {"p": 6.0, "s": 6.0 / 1.73}
+    config["vel"] = {"p": float(args.vp), "s": float(args.vp) / float(args.vp_vs_ratio)}
 
     lon_min, lon_max = config["xlim_degree"]
     lat_min, lat_max = config["ylim_degree"]
@@ -110,36 +136,43 @@ def main():
     _, y_max = proj(x0, lat_max)
     config["y(km)"] = (y_min, y_max)
 
-    config["z(km)"] = (0, 60)
+    config["z(km)"] = (args.depth_min_km, args.depth_max_km)
 
     config["bfgs_bounds"] = (
         (config["x(km)"][0] - 1, config["x(km)"][1] + 1),
         (config["y(km)"][0] - 1, config["y(km)"][1] + 1),
-        (0, config["z(km)"][1] + 1),
+        (config["z(km)"][0], config["z(km)"][1] + 1),
         (None, None),
     )
 
-    config["dbscan_eps"] = 15
-    config["dbscan_min_samples"] = 4
+    # DBSCAN pre-clustering (user-facing; off by default)
+    config["use_dbscan"] = bool(args.use_dbscan)
+    if config["use_dbscan"]:
+        if str(args.dbscan_eps).strip().lower() == "auto":
+            config["dbscan_eps"] = float(estimate_eps(stations, config["vel"]["p"]))
+        else:
+            config["dbscan_eps"] = float(args.dbscan_eps)
+        config["dbscan_min_samples"] = int(args.dbscan_min_samples)
+    if args.ncpu is not None:
+        config["ncpu"] = int(args.ncpu)
 
-    # keep your existing defaults for these
-    config["min_p_picks_per_eq"] = 0
-    config["min_s_picks_per_eq"] = 0
-
-    # keep your existing values unless you later make them user-facing
-    config["use_dbscan"] = False
-    config["use_amplitude"] = True
-
-    # sigma bounds (your script uses these keys later; keep them consistent)
-    # NOTE: GaMMA expects these names; you were already using them.
-    # They are already set above via args -> config.
+    config["min_p_picks_per_eq"] = int(args.min_p_picks_per_eq)
+    config["min_s_picks_per_eq"] = int(args.min_s_picks_per_eq)
 
     if config["use_amplitude"]:
         picks = picks[picks["amp"] != -1]
 
     # GaMMA association
+    if config["use_dbscan"]:
+        print(f"[GaMMA] {len(picks)} picks | DBSCAN on: eps={config['dbscan_eps']:.1f} s, "
+              f"min_samples={config['dbscan_min_samples']}")
+    else:
+        print(f"[GaMMA] {len(picks)} picks | DBSCAN off")
+    t_start = time.time()
     event_idx0 = 1
     catalogs, assignments = association(picks, stations, config, event_idx0, method=config["method"])
+    print(f"\n[GaMMA] {len(catalogs)} events from {len(assignments)} picks | "
+          f"{config.get('ncpu', 1)} CPU(s) | {time.time() - t_start:.1f} s")
 
     # Process results
     catalogs = pd.DataFrame(

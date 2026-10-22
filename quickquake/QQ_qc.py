@@ -39,25 +39,25 @@ from obspy.geodetics.base import gps2dist_azimuth
 
 
 # ============================================================
-# FIXED DEFAULTS (NOT user-controlled)
+# DEFAULTS (each one can be overridden with a command-line option)
 # ============================================================
 
-PRE_S = 10.0
-POST_S = 40.0
+PRE_S = 10.0              # --pre_s: seconds of waveform loaded before origin time
+POST_S = 40.0             # --post_s: seconds of waveform loaded after origin time
 
-FREQMIN = 1.0
-FREQMAX = 15.0
+FREQMIN = 1.0             # --freqmin: bandpass low corner (Hz)
+FREQMAX = 15.0            # --freqmax: bandpass high corner (Hz)
 
-VMIN_SIGNAL = 2.0
-VMAX_SIGNAL = 8.0
+VMIN_SIGNAL = 2.0         # --vmin_signal: lowest velocity of the signal band (km/s)
+VMAX_SIGNAL = 8.0         # --vmax_signal: highest velocity of the signal band (km/s)
 
-PAD_NEIGHBORS = True
-GEOM_CORRECTION = False
-EPS = 1e-12
+PAD_NEIGHBORS = True      # --no_pad_neighbors: also read neighbor chunks for windows crossing a boundary
+GEOM_CORRECTION = False   # --geom_correction: multiply energy by distance^2
+EPS = 1e-12               # numerical safety term (internal)
 
-MAX_EVENTS = 0  # 0 = all (no user control)
+MAX_EVENTS = 0            # --max_events: 0 = all events
 
-MIN_TOTAL_STATIONS = 4
+MIN_TOTAL_STATIONS = 4    # --min_total_stations
 
 CHUNK_RE = re.compile(r"^\d{8}T\d{6}$")
 
@@ -354,6 +354,14 @@ def qc_one_event(
     plot_dir: Path,
     min_total_stations: int,
     min_valid_stations_per_v: int,
+    pre_s: float = PRE_S,
+    post_s: float = POST_S,
+    freqmin: float = FREQMIN,
+    freqmax: float = FREQMAX,
+    vmin_signal: float = VMIN_SIGNAL,
+    vmax_signal: float = VMAX_SIGNAL,
+    pad_neighbors: bool = PAD_NEIGHBORS,
+    geom_correction: bool = GEOM_CORRECTION,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -366,8 +374,8 @@ def qc_one_event(
     ev_depth_km = float(row_event.get("depth_km", 0.0))
     eid = int(row_event["event_id"])
 
-    t_start = t0 - float(PRE_S)
-    t_end = t0 + float(POST_S)
+    t_start = t0 - float(pre_s)
+    t_end = t0 + float(post_s)
 
     stations_with_picks = event_to_station_ids.get(eid, [])
     if len(stations_with_picks) == 0:
@@ -381,7 +389,7 @@ def qc_one_event(
     if len(dist_map) < int(min_total_stations):
         return build_skip_result(eid, "too_few_stations_in_metadata")
 
-    st_raw, files = cache.get_stream(t_start, t_end, times, dirs, pad_neighbors=PAD_NEIGHBORS)
+    st_raw, files = cache.get_stream(t_start, t_end, times, dirs, pad_neighbors=pad_neighbors)
     if st_raw is None:
         return build_skip_result(eid, "no_waveforms_loaded")
 
@@ -407,8 +415,8 @@ def qc_one_event(
 
         sr = float(tr.stats.sampling_rate)
         nyq = 0.5 * sr
-        fmin = max(0.001, min(float(FREQMIN), nyq * 0.99))
-        fmax = max(fmin + 0.001, min(float(FREQMAX), nyq * 0.99))
+        fmin = max(0.001, min(float(freqmin), nyq * 0.99))
+        fmax = max(fmin + 0.001, min(float(freqmax), nyq * 0.99))
         if fmax > fmin:
             tr.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
 
@@ -442,7 +450,7 @@ def qc_one_event(
             if not np.isfinite(E) or E <= 0.0:
                 continue
 
-            if GEOM_CORRECTION:
+            if geom_correction:
                 E *= (dkm ** 2)
 
             Ev_sum += E
@@ -454,7 +462,7 @@ def qc_one_event(
     if not np.any(np.isfinite(energies)) or float(np.nanmax(energies)) <= 0.0:
         return build_skip_result(eid, "no_valid_energy_curve")
 
-    sig_mask = (v_grid >= float(VMIN_SIGNAL)) & (v_grid <= float(VMAX_SIGNAL)) & np.isfinite(energies)
+    sig_mask = (v_grid >= float(vmin_signal)) & (v_grid <= float(vmax_signal)) & np.isfinite(energies)
     if not np.any(sig_mask):
         return build_skip_result(eid, "no_valid_signal_band")
 
@@ -476,31 +484,88 @@ def qc_one_event(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(10, 4))
+        # -------------------------
+        # Plot style, same as moveout reference
+        # -------------------------
+        figsize = (10, 7)
+        label_fontsize = 18
+        tick_fontsize = 20
+        title_fontsize = 17
+        legend_fontsize = 15
+
+        fig, ax = plt.subplots(figsize=figsize)
+
         ax.plot(v_grid, energies, "k-", lw=2)
 
         highlight_w = 0.15
         x0 = best_v - 0.5 * highlight_w
         x1 = best_v + 0.5 * highlight_w
+
         ax.axvspan(x0, x1, color="red", alpha=0.18, zorder=0)
         ax.axvline(best_v, color="red", lw=1.2, alpha=0.8)
 
-        ax.axhline(e_noise, color="tab:orange", lw=2.0, label=f"P{noise_percentile:.0f}={e_noise:.2e}")
-        ax.axhline(e_signal, color="tab:cyan", lw=2.0, label=f"P{signal_percentile:.0f}={e_signal:.2e}")
+        ax.axhline(
+            e_noise,
+            color="tab:orange",
+            lw=2.0,
+            label=f"P{noise_percentile:.0f}={e_noise:.2e}",
+        )
+
+        ax.axhline(
+            e_signal,
+            color="tab:cyan",
+            lw=2.0,
+            label=f"P{signal_percentile:.0f}={e_signal:.2e}",
+        )
 
         ax.set_title(
             f"event_id={eid} | {t0.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"P{signal_percentile:.0f}/P{noise_percentile:.0f}={ratio:.2f}"
+            f"P{signal_percentile:.0f}/P{noise_percentile:.0f}={ratio:.2f}",
+            fontsize=title_fontsize,
+            pad=12,
         )
-        ax.set_xlabel("Velocity (km/s)")
-        ax.set_ylabel("Stacked Energy")
+
+        ax.set_xlabel("Velocity (km/s)", fontsize=label_fontsize, labelpad=10)
+        ax.set_ylabel("Stacked Energy", fontsize=label_fontsize, labelpad=10)
+
+        ax.tick_params(
+            axis="both",
+            which="major",
+            labelsize=tick_fontsize,
+            length=7,
+            width=1.4,
+        )
+
+        # Enlarge the axis offset text (e.g. 1e-5 / 1e-6) when it appears
+        ax.xaxis.offsetText.set_fontsize(tick_fontsize)
+        ax.yaxis.offsetText.set_fontsize(tick_fontsize)
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.2)
+
         ax.grid(ls="-", alpha=0.15)
-        ax.legend()
-        plt.tight_layout()
+
+        leg = ax.legend(fontsize=legend_fontsize)
+        if leg is not None:
+            leg.get_frame().set_linewidth(0.8)
+
+        fig.subplots_adjust(
+            left=0.14,
+            right=0.97,
+            bottom=0.13,
+            top=0.90,
+        )
 
         plot_dir.mkdir(parents=True, exist_ok=True)
         out_png = plot_dir / f"qc_event{eid}_{t0.strftime('%Y%m%dT%H%M%S')}.png"
-        fig.savefig(out_png, dpi=150)
+
+        fig.savefig(
+            out_png,
+            dpi=150,
+            bbox_inches="tight",
+            pad_inches=0.03,
+        )
+
         plt.close(fig)
 
     return {
@@ -544,9 +609,9 @@ def main():
     ap.add_argument("--make_plot", action="store_true", help="Save QC plots to merged/output/qc_plots_{namebase}/")
     ap.add_argument(
         "--max_plots",
-        type=int,
-        default=50,
-        help="Max number of plots to save when --make_plot is enabled (default: 50)",
+        type=lambda s: None if str(s).strip().lower() in ("none", "all") else int(s),
+        default=20,
+        help="Max number of plots to save when --make_plot is enabled (default: 20; 'None' = plot all events)",
     )
     ap.add_argument(
         "--min_total_stations",
@@ -561,6 +626,24 @@ def main():
         help="Minimum number of stations contributing at each test velocity. "
              "If not provided, defaults to --min_total_stations.",
     )
+    ap.add_argument("--pre_s", type=float, default=PRE_S,
+                    help=f"Seconds of waveform loaded before origin time (default: {PRE_S})")
+    ap.add_argument("--post_s", type=float, default=POST_S,
+                    help=f"Seconds of waveform loaded after origin time (default: {POST_S})")
+    ap.add_argument("--freqmin", type=float, default=FREQMIN,
+                    help=f"Bandpass low corner in Hz (default: {FREQMIN})")
+    ap.add_argument("--freqmax", type=float, default=FREQMAX,
+                    help=f"Bandpass high corner in Hz, clipped to Nyquist (default: {FREQMAX})")
+    ap.add_argument("--vmin_signal", type=float, default=VMIN_SIGNAL,
+                    help=f"Lowest velocity of the signal band in km/s (default: {VMIN_SIGNAL})")
+    ap.add_argument("--vmax_signal", type=float, default=VMAX_SIGNAL,
+                    help=f"Highest velocity of the signal band in km/s (default: {VMAX_SIGNAL})")
+    ap.add_argument("--no_pad_neighbors", action="store_true",
+                    help="Do not read neighbor chunks when a window crosses a chunk boundary")
+    ap.add_argument("--geom_correction", action="store_true",
+                    help="Multiply window energy by distance^2 (geometric spreading correction)")
+    ap.add_argument("--max_events", type=int, default=MAX_EVENTS,
+                    help="Process only the first N events; 0 = all (default: 0)")
 
     args = ap.parse_args()
     min_total_stations = int(args.min_total_stations)
@@ -589,11 +672,11 @@ def main():
     cache = StreamCache()
 
     plot_dir = data_root / "merged" / "output" / f"qc_plots_{namebase}"
-    plots_left = int(args.max_plots)
+    plots_left = np.inf if args.max_plots is None else int(args.max_plots)
     v_grid = np.flip(np.linspace(float(args.vmin_curve), float(args.vmax_curve), int(args.vsteps_curve)))
 
     rows = []
-    n_total = len(catalog) if int(MAX_EVENTS) <= 0 else min(len(catalog), int(MAX_EVENTS))
+    n_total = len(catalog) if int(args.max_events) <= 0 else min(len(catalog), int(args.max_events))
 
     for i in range(n_total):
         row_event = catalog.iloc[i]
@@ -616,6 +699,14 @@ def main():
             plot_dir=plot_dir,
             min_total_stations=min_total_stations,
             min_valid_stations_per_v=min_valid_stations_per_v,
+            pre_s=args.pre_s,
+            post_s=args.post_s,
+            freqmin=args.freqmin,
+            freqmax=args.freqmax,
+            vmin_signal=args.vmin_signal,
+            vmax_signal=args.vmax_signal,
+            pad_neighbors=not args.no_pad_neighbors,
+            geom_correction=args.geom_correction,
         )
 
         rows.append(r)
@@ -696,7 +787,8 @@ def main():
     print(f"Wrote skipped catalog:  {qc_skipped_catalog_csv}")
 
     if bool(args.make_plot):
-        print(f"Wrote up to {int(args.max_plots)} plots in: {plot_dir}")
+        limit = "all" if args.max_plots is None else f"up to {int(args.max_plots)}"
+        print(f"Wrote {limit} plots in: {plot_dir}")
 
     print(f"\nKept {len(filtered)} / {len(raw_out)} events with pc_ratio_energy >= {args.min_ratio}")
     print(f"Rejected by ratio {len(rejected)} / {len(raw_out)} events")

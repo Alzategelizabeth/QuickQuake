@@ -1,0 +1,3 @@
+[submodule "dependencies/HypoXPy"]
+	path = dependencies/HypoXPy
+	url = https://github.com/xtyangpsp/HypoXPy.git

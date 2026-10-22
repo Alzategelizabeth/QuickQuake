@@ -1,1 +1,25 @@
-quickquake_dev_x86.tar
+# Results: keep them in your project folder, not in the code repository
+/data/
+/quickquake/data/
+/examples/*/data/
+*.mseed
+waveform_index*.pkl
+
+# Python and notebooks
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Compiled programs and objects
+*.o
+compile_error.log
+
+# System files and archives
+.DS_Store
+*.tar
+
+# Code maps made by graphify
+graphify-out/
+
+# Claude Code settings and work copies (local only)
+.claude/
