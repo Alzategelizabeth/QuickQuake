@@ -20,6 +20,3 @@ compile_error.log
 
 # Code maps made by graphify
 graphify-out/
-
-# Claude Code settings and work copies (local only)
-.claude/
