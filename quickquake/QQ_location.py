@@ -16,6 +16,8 @@ This script will:
     input/GAMMA_picks.csv    -> ../gammapicks_id.csv
 - Link/copy velocity models + templates into input/ (models may be a name inside
   <repo>/hypox_templates or a full path to your own .cre file)
+- Write the same velocity models into the HypoDD template copy, so HypoInverse
+  and HypoDD locate with one model
 - Run hypoxpy.workflow.relocate()
 
 Outputs (in <data_root>/merged/output/):
@@ -125,6 +127,93 @@ def remove_previous_results(outdir: Path, namebase: str):
             path.unlink()
 
 
+def read_cre_model(path: Path):
+    """
+    Read a HypoInverse CRE velocity model: a title line, then one line per layer
+    with the velocity (km/s) and the depth of the layer top (km below the top of
+    the model, which HypoInverse places at the reference elevation ref_ele).
+    """
+    with open(path) as fp:
+        lines = fp.read().splitlines()[1:]   # first line is the title
+    vel, top = [], []
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2:
+            vel.append(float(parts[0]))
+            top.append(float(parts[1]))
+    if not vel:
+        raise ValueError(f"No layers found in velocity model {path}")
+    return vel, top
+
+
+def hypodd_model_block(pmodel: Path, smodel: Path, ref_ele: float):
+    """
+    HypoDD forward model equal to the HypoInverse CRE models, so that location and
+    relocation use the same velocities. IMOD = 1: layered Vp with one Vp/Vs ratio
+    per layer, taken from the P and S models.
+
+    Depth datum: HypoInverse reports CRE depths below sea level, and HypoDD 2.1
+    measures layer tops and event depths from sea level, then adds each station's
+    elevation (partials.f). The CRE layer tops are measured from the top of the
+    model, ref_ele km above sea level, so each one moves up by ref_ele. HypoDD's
+    first layer starts at 0 and reaches up to every station, like the top CRE layer.
+    """
+    vp, top_p = read_cre_model(pmodel)
+    vs, top_s = read_cre_model(smodel)
+    if top_p != top_s:
+        raise ValueError(f"The P and S models must have the same layers for HypoDD "
+                         f"(IMOD = 1): {pmodel.name} {top_p}, {smodel.name} {top_s}")
+    if top_p[0] != 0.0:
+        raise ValueError(f"The first layer of {pmodel.name} must start at depth 0, not {top_p[0]}")
+    top = [0.0] + [t - ref_ele for t in top_p[1:]]
+    if len(top) > 1 and top[1] <= 0.0:
+        raise ValueError(f"location_ref_ele ({ref_ele} km) is not smaller than the first "
+                         f"layer of {pmodel.name} ({top_p[1]} km): the layer would lie above sea level")
+    ratio = [p / s for p, s in zip(vp, vs)]
+
+    def row(values, ndigits):
+        return " ".join(f"{round(v, ndigits):g}" for v in values)
+
+    return [
+        "*--- FORWARD MODEL SPECIFICATIONS:\n",
+        f"* Written by QuickQuake (QQ_location.py) from the HypoInverse models {pmodel.name}\n",
+        f"* and {smodel.name}, with layer tops moved from the model top (reference\n",
+        f"* elevation {ref_ele} km) to sea level, the depth datum of HypoInverse CRE\n",
+        "* depths and of HypoDD station elevations.\n",
+        "* IMOD\n",
+        "1\n",
+        "* TOP:\n",
+        row(top, 3) + "\n",
+        "* VELP:\n",
+        row(vp, 3) + "\n",
+        "* RAT:\n",
+        row(ratio, 4) + "\n",
+        "*\n",
+    ]
+
+
+def write_hypodd_template(template: Path, dst: Path, pmodel: Path, smodel: Path, ref_ele: float):
+    """
+    Copy the HypoDD template to dst with its forward-model section (from
+    '*--- FORWARD MODEL' to '*--- CLUSTER/EVENT SELECTION') replaced by the
+    HypoInverse velocity models.
+    """
+    with open(template) as fp:
+        lines = fp.readlines()
+    starts = [i for i, l in enumerate(lines) if l.startswith("*--- FORWARD MODEL")]
+    ends = [i for i, l in enumerate(lines) if l.startswith("*--- CLUSTER/EVENT SELECTION")]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
+        raise ValueError(f"{template} needs one '*--- FORWARD MODEL SPECIFICATIONS:' line followed by "
+                         "one '*--- CLUSTER/EVENT SELECTION:' line, where QuickQuake writes the velocity model")
+    lines = lines[:starts[0]] + hypodd_model_block(pmodel, smodel, ref_ele) + lines[ends[0]:]
+
+    # dst may be a link to the template of an earlier run: remove it, never write through it
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    with open(dst, "w") as fp:
+        fp.writelines(lines)
+
+
 def resolve_model(model: str, templates_dir: Path) -> Path:
     """
     A velocity model can be given as a file name inside templates_dir
@@ -140,7 +229,7 @@ def resolve_model(model: str, templates_dir: Path) -> Path:
 #                     p_model_name: str, s_model_name: str):
 
 def stage_in_merged(merged_dir: Path, templates_dir: Path, namebase: str,
-                    p_model_name: str, s_model_name: str,
+                    p_model_name: str, s_model_name: str, ref_ele: float,
                     picks_override: Optional[Path] = None):
     """
     Work INSIDE merged_dir:
@@ -191,7 +280,10 @@ def stage_in_merged(merged_dir: Path, templates_dir: Path, namebase: str,
     link_or_copy(smodel, indir / smodel.name)
     link_or_copy(t_hypoinv, indir / t_hypoinv.name)
     link_or_copy(t_ph2dt, indir / t_ph2dt.name)
-    link_or_copy(t_hypodd, indir / t_hypodd.name)
+    # HypoDD gets the same velocity model as HypoInverse, written into its template copy
+    write_hypodd_template(t_hypodd, indir / t_hypodd.name, pmodel, smodel, ref_ele)
+    print(f"[location] HypoDD velocity model written from {pmodel.name} and {smodel.name} "
+          f"(layer tops moved up by ref_ele = {ref_ele} km to sea level)")
 
     return indir, outdir, pmodel.name, smodel.name
 
@@ -275,6 +367,7 @@ def main():
         namebase=args.namebase,
         p_model_name=args.p_model,
         s_model_name=args.s_model,
+        ref_ele=args.ref_ele,
         picks_override=picks_override
     )
     drop_location_codes(indir, args.namebase)

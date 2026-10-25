@@ -4,6 +4,7 @@ Versions stay 0.x until the first official release (1.0).
 
 ## Unreleased
 
+- HypoDD now uses the same velocity model as HypoInverse. Before, `hypox_templates/template_hypodd_par.inp` held the HypoDD example model (6 layers, Vp 3.77–7.98 km/s, Vp/Vs 1.73), so relocation used a different model from location (`location_p_model`, `location_s_model`). `QQ_location.py` now writes the HypoDD forward model from the two `.cre` files (IMOD = 1: one Vp/Vs ratio per layer, from the P and S models), with the layer tops moved up by `location_ref_ele`: HypoInverse gives CRE depths below sea level, and HypoDD 2.1 measures layer tops from sea level and adds station elevations. The template's model section is now only a note. Checked on the Aniakchak example (2023-03-30): HypoInverse catalog unchanged; HypoDD depths change by -0.06 to +0.41 km (median 0), horizontal positions by at most 0.01 km; the same 23 of 34 events pass QC. Catalogs made before this change should be relocated again (`RUN_LOCATION` and `RUN_QC`).
 - Download: the radius search is now the only method. The box-search scripts `QQ_dl_stations.py` and `QQ_dl_data.py` (fixed networks and channels) were removed, and so were the driver options `station_search`, `networks` and `channels`. The default data center is `EARTHSCOPE_FEDERATOR`.
 - The radius-search scripts `QQ_dl_stations_radius.py` and `QQ_dl_data_radius.py` were renamed to `QQ_dl_stations.py` and `QQ_dl_data.py`, since they are now the only download scripts.
 - New driver option `station_excluded_stations`: stations to leave out, as `"NET.STA"`.
@@ -14,7 +15,7 @@ Versions stay 0.x until the first official release (1.0).
 - Drivers: `location_binpath = None` (new default) uses the programs compiled into the environment, or `~/bin` if they are not there.
 - Removed `environment_mac.yml`: `environment.yml` solves on macOS (Intel and Apple chips).
 - README: installation is clone (`--depth 1`, without the history) + `bash install.sh` + `conda activate`; the manual compilation section and the macOS `SDKROOT` fix were removed (install.sh does both).
-- `.gitignore`: `.claude/` (local Claude Code files) and `compile_error.log`.
+- `.gitignore`: `compile_error.log`.
 - `examples/pavlof_2021/QQ_driver.py`: `RUN_CONFIG`, `RUN_DL` and `RUN_PHASENET` are on again, so the example runs from the download to the QC. Checked from a fresh clone: `install.sh` (3 min) + the Pavlof example (4.5 min) give HypoDD and QC catalogs byte-identical to the previous run.
 - 3D views without pygmt: pygmt (GMT) cannot be installed next to TensorFlow 2.14, because GMT needs newer system libraries (icu, grpc, abseil, proj). The new `qq_helpers.load_earth_relief` downloads the same SRTM15+ v2.7 tiles from the GMT data server and reads them with `requests` + `pillow`; it returns the same grid as `pygmt.datasets.load_earth_relief` (checked: identical values and coordinates for 8 test regions at 15s, 30s, 01m and 05m, including regions over 2 and 4 tiles). The five 3D functions use it. Tiles are kept in `~/.quickquake/earth_relief/`.
 - `environment.yml`: added `pillow`, `plotly=7.0` and `python-kaleido=1.3` (newest versions for Python 3.10; they install without changing TensorFlow, Keras or scikit-learn).
