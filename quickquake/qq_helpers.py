@@ -434,6 +434,114 @@ def ellipse_lonlat_from_km(lon0, lat0, a_km, b_km, theta_deg=0.0, n=200):
 # 2D MAP VIEWS
 # ============================================================
 
+# ============================================================
+# MAP BACKGROUND TILES (ESRI World Shaded Relief)
+# ============================================================
+# cartopy downloads map tiles in parallel with urlopen() and NO timeout: one stalled connection
+# blocks the figure forever (seen with cartopy 0.23 and 0.25). This tile source is cartopy's
+# GoogleTiles with the ESRI shaded-relief URL, plus a timeout and retries per tile and an
+# on-disk cache, so each tile is downloaded once and later maps/runs read it from disk.
+
+TILE_CACHE_DIR = Path.home() / ".quickquake" / "map_tiles"   # next to the earth_relief cache
+TILE_TIMEOUT_S = 20                                         # seconds to wait for one tile
+TILE_RETRIES = 3                                            # attempts per tile before giving up
+_SHADED_RELIEF_CLASS = None
+
+
+def _shaded_relief_tile_class():
+    """
+    cartopy tile source for ESRI World Shaded Relief (built once, cartopy imported lazily).
+
+    Same behaviour as cartopy's GoogleWTS.get_image, plus: each download times out after
+    TILE_TIMEOUT_S seconds and is retried TILE_RETRIES times; tiles are cached in
+    TILE_CACHE_DIR (a tile that could not be downloaded is drawn light grey, as cartopy
+    does, and is not cached).
+    """
+    global _SHADED_RELIEF_CLASS
+    if _SHADED_RELIEF_CLASS is not None:
+        return _SHADED_RELIEF_CLASS
+
+    import io
+    import time
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+    from PIL import Image
+    from cartopy.io import img_tiles as cimgt
+
+    class ShadedReliefESRI(cimgt.GoogleTiles):
+        def __init__(self, cache=TILE_CACHE_DIR, **kwargs):
+            # cache: a folder, True (cartopy's default folder) or False/None (no cache)
+            super().__init__(cache=False if cache is None else cache, **kwargs)
+
+        def _image_url(self, tile):
+            x, y, z = tile
+            return (
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
+            )
+
+        def get_image(self, tile):
+            if self.cache_path is not None:
+                cached_file = self._cache_dir / ("_".join(str(i) for i in tile) + ".npy")
+            else:
+                cached_file = None
+
+            if cached_file in self.cache:
+                img = np.load(cached_file, allow_pickle=False)
+            else:
+                img = None
+                for attempt in range(TILE_RETRIES):
+                    try:
+                        request = Request(self._image_url(tile), headers={"User-Agent": self.user_agent})
+                        with urlopen(request, timeout=TILE_TIMEOUT_S) as fh:
+                            img = Image.open(io.BytesIO(fh.read()))
+                            img.load()
+                        break
+                    except (HTTPError, URLError, OSError) as err:   # OSError includes timeouts
+                        if attempt == TILE_RETRIES - 1:
+                            print(f"[tiles] could not download tile {tile}: {err}")
+                        else:
+                            time.sleep(2.0)
+                if img is None:
+                    # light-grey tile, as cartopy draws a failed download; not cached
+                    img = Image.fromarray(np.full((256, 256, 3), (250, 250, 250), dtype=np.uint8))
+                    cached_file = None
+                img = img.convert(self.desired_tile_form)
+                if cached_file is not None:
+                    np.save(cached_file, img, allow_pickle=False)
+                    self.cache.add(cached_file)
+
+            return img, self.tileextent(tile), "lower"
+
+        def image_for_domain(self, target_domain, target_z):
+            # Same as cartopy's, but the tiles are merged in a fixed order. cartopy merges them in
+            # the order the parallel downloads finish, which changes a few edge pixels per run.
+            import concurrent.futures
+
+            def fetch_tile(tile):
+                img, extent, origin = self.get_image(tile)
+                img = np.array(img)
+                x = np.linspace(extent[0], extent[1], img.shape[1])
+                y = np.linspace(extent[2], extent[3], img.shape[0])
+                return img, x, y, origin
+
+            tiles = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self._MAX_THREADS) as executor:
+                futures = [executor.submit(fetch_tile, tile)
+                           for tile in self.find_images(target_domain, target_z)]
+                for future in futures:            # request order, not completion order
+                    try:
+                        tiles.append(list(future.result()))
+                    except OSError:
+                        pass
+
+            img, extent, origin = cimgt._merge_tiles(tiles)
+            return img, extent, origin
+
+    _SHADED_RELIEF_CLASS = ShadedReliefESRI
+    return ShadedReliefESRI
+
+
 def plot_mapview_seismicity(
     catalog,
     stations,
@@ -470,15 +578,8 @@ def plot_mapview_seismicity(
     import matplotlib.ticker as mticker
     import cartopy.crs as ccrs
     import cartopy.mpl.ticker as cticker
-    from cartopy.io import img_tiles as cimgt
-
-    class ShadedReliefESRI(cimgt.GoogleTiles):
-        def _image_url(self, tile):
-            x, y, z = tile
-            return (
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
-            )
+    # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
+    ShadedReliefESRI = _shaded_relief_tile_class()
 
     # catc / stc map other column names (e.g. a USGS catalog) onto the default ones
     quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
@@ -631,15 +732,8 @@ def plot_mapview_basemap_stations(
     import matplotlib.ticker as mticker
     import cartopy.crs as ccrs
     import cartopy.mpl.ticker as cticker
-    from cartopy.io import img_tiles as cimgt
-
-    class ShadedReliefESRI(cimgt.GoogleTiles):
-        def _image_url(self, tile):
-            x, y, z = tile
-            return (
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
-            )
+    # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
+    ShadedReliefESRI = _shaded_relief_tile_class()
 
     # Use catalog ONLY to keep the exact same map bounds
     # catc / stc map other column names (e.g. a USGS catalog) onto the default ones
@@ -761,15 +855,8 @@ def plot_mapview_seismicity_zoom(
     import matplotlib.ticker as mticker
     import cartopy.crs as ccrs
     import cartopy.mpl.ticker as cticker
-    from cartopy.io import img_tiles as cimgt
-
-    class ShadedReliefESRI(cimgt.GoogleTiles):
-        def _image_url(self, tile):
-            x, y, z = tile
-            return (
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
-            )
+    # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
+    ShadedReliefESRI = _shaded_relief_tile_class()
 
     # catc maps other column names (e.g. a USGS catalog) onto the default ones
     quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
@@ -988,15 +1075,8 @@ def plot_mapview_seismicity_zoom_2(
     import matplotlib.ticker as mticker
     import cartopy.crs as ccrs
     import cartopy.mpl.ticker as cticker
-    from cartopy.io import img_tiles as cimgt
-
-    class ShadedReliefESRI(cimgt.GoogleTiles):
-        def _image_url(self, tile):
-            x, y, z = tile
-            return (
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
-            )
+    # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
+    ShadedReliefESRI = _shaded_relief_tile_class()
 
     # filter by time first
     quakes_for_map = make_quakes_for_map(catalog, start, end)
@@ -3324,15 +3404,8 @@ def plot_location_evolution_map(
     import matplotlib.ticker as mticker
     import cartopy.crs as ccrs
     import cartopy.mpl.ticker as cticker
-    from cartopy.io import img_tiles as cimgt
-
-    class ShadedReliefESRI(cimgt.GoogleTiles):
-        def _image_url(self, tile):
-            x, y, z = tile
-            return (
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                f"World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}.jpg"
-            )
+    # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
+    ShadedReliefESRI = _shaded_relief_tile_class()
 
     plot_df = df.copy()
 
