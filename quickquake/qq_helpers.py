@@ -7136,6 +7136,33 @@ class WaveformIndex:
         return [Path(p) for p in self.df.loc[i0p:i1p, "path"].tolist()]
 
 
+def harmonize_sampling_rates(st, rtol: float = 1e-4):
+    """
+    Make traces with the same id share one sampling rate so Stream.merge() works.
+
+    Some day files store the rate measured by the datalogger (e.g. 50.0000114 or
+    49.9999848 Hz instead of 50 Hz); ObsPy refuses to merge consecutive days whose
+    rates differ by that jitter. Rates within `rtol` of the nominal value are snapped
+    to it; a trace whose nominal rate really differs from the rest of its id (station
+    changed its rate) is resampled to the rate of the longest trace of that id.
+    """
+    for tr in st:
+        sr = float(tr.stats.sampling_rate)
+        nominal = float(round(sr)) if sr >= 1.0 else 1.0 / round(1.0 / sr)
+        if sr != nominal and abs(sr - nominal) <= rtol * nominal:
+            tr.stats.sampling_rate = nominal
+
+    by_id: Dict[str, list] = {}
+    for tr in st:
+        by_id.setdefault(tr.id, []).append(tr)
+    for trs in by_id.values():
+        target = max(trs, key=lambda t: t.stats.npts).stats.sampling_rate
+        for tr in trs:
+            if tr.stats.sampling_rate != target:
+                tr.resample(target)
+    return st
+
+
 class StreamCache:
     def __init__(self):
         self._key = None
@@ -7165,6 +7192,7 @@ class StreamCache:
             self._st = None
             return None, list(files)
 
+        harmonize_sampling_rates(st)
         st.merge(fill_value="interpolate")
         self._key = key
         self._st = st
