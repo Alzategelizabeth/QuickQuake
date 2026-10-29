@@ -76,6 +76,7 @@ NOISE_WINDOW_S = 300.0    # --noise_window_s: seconds before origin where the qu
 NOISE_QUANTILE = 20.0     # --noise_quantile: quiet level = this percentile of the window energies there.
                           # A low percentile is the calm part of those minutes: the coda of an earlier
                           # earthquake (swarms) or a passing noise burst barely moves it.
+STATION_COMBINE = "mean"  # --station_combine: "mean" (arithmetic, the original) or "geomean" (geometric)
 TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" mode (internal)
 GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
                           # gaps are filled when the chunk is merged and have ~0 energy after filtering
@@ -454,6 +455,7 @@ def qc_one_event(
     station_normalization: str = STATION_NORMALIZATION,
     noise_window_s: float = NOISE_WINDOW_S,
     noise_quantile: float = NOISE_QUANTILE,
+    station_combine: str = STATION_COMBINE,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -577,11 +579,16 @@ def qc_one_event(
             # "noise" mode: times above this station's own quiet level (1 = its noise)
             E /= noise_level
 
-            Ev_sum += E
+            Ev_sum += np.log(E) if station_combine == "geomean" else E
             n_valid += 1
 
         if n_valid >= req:
-            energies[i] = Ev_sum / float(n_valid)
+            if station_combine == "geomean":
+                # mean of the orders of magnitude: one station 1000x above the rest moves the
+                # result by 1000^(1/N), not by 1000/N as the arithmetic mean does
+                energies[i] = float(np.exp(Ev_sum / float(n_valid)))
+            else:
+                energies[i] = Ev_sum / float(n_valid)
 
     if not np.any(np.isfinite(energies)) or float(np.nanmax(energies)) <= 0.0:
         return build_skip_result(eid, "no_valid_energy_curve")
@@ -784,6 +791,10 @@ def main():
     ap.add_argument("--noise_quantile", type=float, default=NOISE_QUANTILE,
                     help="'noise' mode: the quiet level is this percentile of the window energies "
                          f"in that time (default: {NOISE_QUANTILE})")
+    ap.add_argument("--station_combine", choices=["mean", "geomean"], default=STATION_COMBINE,
+                    help="How the stations are combined at each test velocity: 'mean' (arithmetic, the "
+                         "original) or 'geomean' (geometric mean: one extreme station weighs less) "
+                         f"(default: {STATION_COMBINE})")
 
     args = ap.parse_args()
     min_total_stations = int(args.min_total_stations)
@@ -850,6 +861,7 @@ def main():
             station_normalization=args.station_normalization,
             noise_window_s=args.noise_window_s,
             noise_quantile=args.noise_quantile,
+            station_combine=args.station_combine,
         )
 
         rows.append(r)

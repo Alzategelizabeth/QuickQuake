@@ -127,6 +127,7 @@ DEFAULTS = {
     "qc_station_normalization": "none",
     "qc_noise_window_s": 300.0,
     "qc_noise_quantile": 20.0,
+    "qc_station_combine": "mean",
 }
 COMPUTED = ["BASE_DIR", "DATA_ROOT", "MODEL_DIR", "location_templates_dir"]
 
@@ -474,6 +475,7 @@ def main():
             "--station_normalization", str(qc_station_normalization),
             "--noise_window_s", str(qc_noise_window_s),
             "--noise_quantile", str(qc_noise_quantile),
+            "--station_combine", str(qc_station_combine),
         ]
 
         if qc_make_plot:

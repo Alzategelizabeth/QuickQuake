@@ -165,6 +165,8 @@ qc_station_normalization = "none"  # "none": average raw energies (counts^2), th
                                    # "noise": divide each station by its own quiet noise level first
 qc_noise_window_s = 300.0    # "noise": seconds before origin where the quiet noise level is measured
 qc_noise_quantile = 20.0     # "noise": quiet level = this percentile of the 2-s energies there (calm part)
+qc_station_combine = "mean"  # how stations are combined at each velocity: "mean" (original) or "geomean"
+                             # (geometric mean: one extreme station, e.g. a glitch, weighs less)
 
 #
 # RUN (no need to edit below: quickquake/QQ_run.py runs the steps with the settings above)
