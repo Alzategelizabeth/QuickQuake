@@ -162,9 +162,8 @@ qc_geom_correction = False   # multiply energy by distance^2
 qc_max_events = 0            # test only the first N events (0 = all)
 qc_station_normalization = "none"  # "none": average raw energies (counts^2), the original QC: the station
                                    # with the most counts (nearest, highest gain or noisiest) controls it.
-                                   # "noise": divide each station by its own quiet noise level first
-qc_noise_window_s = 300.0    # "noise": seconds before origin where the quiet noise level is measured
-qc_noise_quantile = 20.0     # "noise": quiet level = this percentile of the 2-s energies there (calm part)
+                                   # "noise": divide each station by its own noise level first
+qc_noise_window_s = 300.0    # "noise": noise level = median energy of these seconds before origin
 
 #
 # RUN (no need to edit below: quickquake/QQ_run.py runs the steps with the settings above)

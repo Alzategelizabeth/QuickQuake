@@ -9,8 +9,8 @@ Station normalization (--station_normalization):
 - "none" (default, the original QC): the curve averages the raw window energy of the
   stations, in counts^2, so the station with the most counts (the nearest one, the one
   with the highest gain or the noisiest one) controls the curve.
-- "noise": each station's window energy is first divided by that station's own quiet
-  noise level, so every station is in "times above its own noise" (1 = noise) before the
+- "noise": each station's window energy is first divided by that station's own
+  noise level (median energy of the minutes before origin), so every station is in "times above its own noise" (1 = noise) before the
   stations are averaged. This is how waveform-stacking location methods treat stations:
   they never stack raw amplitudes but per-station normalized characteristic functions,
   most often STA/LTA, i.e. signal over the station's own recent noise (Kao & Shan 2004;
@@ -73,15 +73,14 @@ MAX_EVENTS = 0            # --max_events: 0 = all events
 MIN_TOTAL_STATIONS = 4    # --min_total_stations
 
 STATION_NORMALIZATION = "none"  # --station_normalization: "none" (raw counts) or "noise"
-NOISE_WINDOW_S = 300.0    # --noise_window_s: seconds before origin where the quiet noise level is measured
-NOISE_QUANTILE = 20.0     # --noise_quantile: quiet level = this percentile of the window energies there.
-                          # A low percentile is the calm part of those minutes: the coda of an earlier
-                          # earthquake (swarms) or a passing noise burst barely moves it.
+NOISE_WINDOW_S = 300.0    # --noise_window_s: seconds before origin where the noise level is measured
+                          # (median over that time, so earlier earthquakes filling less than half of it,
+                          # e.g. in swarms, barely move it)
 TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" mode (internal)
 GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
                           # gaps are filled when the chunk is merged and have ~0 energy after filtering
 ONE_COUNT_NOISE = 1.0 / 12.0  # counts^2: variance of the rounding noise of a digitizer (uniform error of
-                          # +-0.5 count). A quiet level below it means the channel records less than one
+                          # +-0.5 count). A noise level below it means the channel records less than one
                           # digital count of noise, i.e. no live signal (dead or flat channel) (internal)
 
 NEIGHBOR_MARGIN_S = 60.0  # read a neighbor chunk only if the window is this close to its boundary (internal)
@@ -312,35 +311,44 @@ def window_energy_stat(tr: obspy.Trace, t_abs: UTCDateTime, win_len_s: float, en
     return float(val)
 
 
-def quiet_noise_level(
+def noise_level_before_origin(
     tr: obspy.Trace,
     t0: UTCDateTime,
     window_s: float,
     win_len_s: float,
-    quantile: float,
     energy_type: str = "squared_median",
 ) -> Tuple[float, str]:
     """
-    Quiet noise level of one station before the origin time, in the same units as
-    window_energy_stat: the `quantile` percentile of the window energies (windows of
-    `win_len_s`) over the `window_s` seconds before origin. The last window ends 1 s
-    before origin, so no energy of this event enters. Windows in data gaps are dropped.
+    Noise level of one station before the origin time: the same statistic as
+    window_energy_stat (median of x^2, or median of the envelope), taken over all the
+    samples of the `window_s` seconds before origin instead of one short window. The
+    window ends 1 s before origin, so no energy of this event enters. The median ignores
+    earlier earthquakes as long as they fill less than half of that time (swarms).
+    Data gaps (filled when the chunk is merged, ~0 after filtering) are left out: the
+    window is cut in blocks of `win_len_s`, and blocks 1000x below the typical one are dropped.
     Returns (level, "ok") or (nan, reason).
     """
-    starts = np.arange(-float(window_s), -float(win_len_s) - 1.0, float(win_len_s))
-    energies = np.array([
-        window_energy_stat(tr, t0 + s + 0.5 * float(win_len_s), float(win_len_s), energy_type)
-        for s in starts
-    ])
-    if energies.size == 0 or not np.any(energies > 0.0):
+    sr = float(tr.stats.sampling_rate)
+    i0 = max(int((t0 - float(window_s) - tr.stats.starttime) * sr), 0)
+    i1 = max(int((t0 - 1.0 - tr.stats.starttime) * sr), 0)
+    x = tr.data[i0:i1].astype(np.float64, copy=False)
+    values = envelope(x) if energy_type == "envelope_median" else x ** 2
+
+    n_block = int(max(1, round(float(win_len_s) * sr)))
+    n_blocks = values.size // n_block
+    if n_blocks == 0:
+        return float("nan"), "noise_no_data"
+    blocks = values[:n_blocks * n_block].reshape(n_blocks, n_block)
+    block_level = np.median(blocks, axis=1)
+    if not np.any(block_level > 0.0):
         return float("nan"), "noise_no_data"
 
-    typical = float(np.median(energies[energies > 0.0]))
-    not_gap = energies[energies > GAP_FRACTION * typical]
-    if not_gap.size < 0.5 * energies.size:
+    typical = float(np.median(block_level[block_level > 0.0]))
+    not_gap = block_level > GAP_FRACTION * typical
+    if not_gap.sum() < 0.5 * n_blocks:
         return float("nan"), "noise_mostly_gaps"
 
-    level = float(np.percentile(not_gap, float(quantile)))
+    level = float(np.median(blocks[not_gap]))
     # Dead channel: less noise than one digital count. Its ratio to any glitch would be huge.
     one_count = ONE_COUNT_NOISE if energy_type == "squared_median" else float(np.sqrt(ONE_COUNT_NOISE))
     if level < one_count:
@@ -477,7 +485,6 @@ def qc_one_event(
     geom_correction: bool = GEOM_CORRECTION,
     station_normalization: str = STATION_NORMALIZATION,
     noise_window_s: float = NOISE_WINDOW_S,
-    noise_quantile: float = NOISE_QUANTILE,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -492,7 +499,7 @@ def qc_one_event(
 
     by_noise = station_normalization == "noise"
     if by_noise:
-        # The quiet noise level needs the minutes before origin; the taper is kept short (seconds,
+        # The noise level needs the minutes before origin; the taper is kept short (seconds,
         # not a fraction of this longer trace) and the energy windows stay out of it.
         # t_end and t_last are set below, once the station distances are known.
         t_start = t0 - float(noise_window_s) - TAPER_S
@@ -558,8 +565,8 @@ def qc_one_event(
 
         noise_level = 1.0
         if by_noise:
-            noise_level, why = quiet_noise_level(
-                tr, t0, noise_window_s, winlen, noise_quantile, energy_type=energy_type,
+            noise_level, why = noise_level_before_origin(
+                tr, t0, noise_window_s, winlen, energy_type=energy_type,
             )
             if why != "ok":
                 dropped[f"{net}.{sta}"] = why
@@ -598,7 +605,7 @@ def qc_one_event(
             if geom_correction:
                 E *= (dkm ** 2)
 
-            # "noise" mode: times above this station's own quiet level (1 = its noise)
+            # "noise" mode: times above this station's own noise level (1 = its noise)
             E /= noise_level
 
             Ev_sum += E
@@ -800,14 +807,11 @@ def main():
                     help="Process only the first N events; 0 = all (default: 0)")
     ap.add_argument("--station_normalization", choices=["none", "noise"], default=STATION_NORMALIZATION,
                     help="'none': average raw window energies (counts^2), the original QC; "
-                         "'noise': divide each station's energies by its own quiet noise level first "
+                         "'noise': divide each station's energies by its own noise level first "
                          f"(default: {STATION_NORMALIZATION})")
     ap.add_argument("--noise_window_s", type=float, default=NOISE_WINDOW_S,
-                    help="'noise' mode: seconds before origin where the quiet noise level is measured "
+                    help="'noise' mode: seconds before origin where the noise level (median energy) is measured "
                          f"(default: {NOISE_WINDOW_S})")
-    ap.add_argument("--noise_quantile", type=float, default=NOISE_QUANTILE,
-                    help="'noise' mode: the quiet level is this percentile of the window energies "
-                         f"in that time (default: {NOISE_QUANTILE})")
 
     args = ap.parse_args()
     min_total_stations = int(args.min_total_stations)
@@ -876,7 +880,6 @@ def main():
             geom_correction=args.geom_correction,
             station_normalization=args.station_normalization,
             noise_window_s=args.noise_window_s,
-            noise_quantile=args.noise_quantile,
         )
 
         rows.append(r)
