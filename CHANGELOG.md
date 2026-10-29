@@ -4,6 +4,7 @@ Versions stay 0.x until the first official release (1.0).
 
 ## Unreleased
 
+- `visualization.ipynb`: the timeline histogram is drawn without its legend (`show_legend=False`); the legend is its own figure in the next cell.
 - `qq_helpers.plot_mapview_seismicity` and `plot_mapview_seismicity_zoom`: the depth colour bar has 0 km at the top and the deepest value at the bottom (`depth_down=True`, new). Its ticks are now integers chosen by matplotlib; before, they were 9 evenly spaced values written as `int`, so with a 0–13 km bar the ticks at 1.625, 3.25 … km were labelled 1, 3 … The two functions share the new `_depth_colorbar`. In `plot_mapview_seismicity` the legend shows only the earthquakes (`station_legend=False`, new); the networks are in the station map.
 - `visualization.ipynb`: the zoom window is set in the zoom cell (`ZOOM_LON`, `ZOOM_LAT` in degrees, passed as `xlim` / `ylim`; `None` keeps `zoom_factor=3`), and the cell prints how many events fall inside it.
 
