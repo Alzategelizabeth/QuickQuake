@@ -79,6 +79,9 @@ NOISE_QUANTILE = 20.0     # --noise_quantile: quiet level = this percentile of t
 TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" mode (internal)
 GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
                           # gaps are filled when the chunk is merged and have ~0 energy after filtering
+ONE_COUNT_NOISE = 1.0 / 12.0  # counts^2: variance of the rounding noise of a digitizer (uniform error of
+                          # +-0.5 count). A quiet level below it means the channel records less than one
+                          # digital count of noise, i.e. no live signal (dead or flat channel) (internal)
 
 CHUNK_RE = re.compile(r"^\d{8}T\d{6}$")
 
@@ -308,7 +311,13 @@ def quiet_noise_level(
     if not_gap.size < 0.5 * energies.size:
         return float("nan"), "noise_mostly_gaps"
 
-    return float(np.percentile(not_gap, float(quantile))), "ok"
+    level = float(np.percentile(not_gap, float(quantile)))
+    # Dead channel: less noise than one digital count. Its ratio to any glitch would be huge.
+    one_count = ONE_COUNT_NOISE if energy_type == "squared_median" else float(np.sqrt(ONE_COUNT_NOISE))
+    if level < one_count:
+        return float("nan"), "noise_below_one_count"
+
+    return level, "ok"
 
 
 def safe_percentile(x: np.ndarray, p: float) -> float:
