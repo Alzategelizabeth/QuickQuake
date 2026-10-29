@@ -75,6 +75,10 @@ NETWORK_COLOURS: Dict[str, str] = {
     "6D": "#e377c2",   # Bowdoin 2019
     "7Q": "#ff7f0e",   # GreenDrill
     "AV": "#1f77b4",   # Alaska Volcano Observatory (Pavlof example)
+    "AK": "#9467bd",   # Alaska Regional Network
+    "AT": "#2ca02c",   # National Tsunami Warning Center Alaska Seismic Network
+    "AM": "#ff7f0e",   # Raspberry Shake network
+    "6J": "#8c564b",   # 2021 Chignik RAPID (response to the 29 July 2021 Chignik earthquake)
 }
 FALLBACK_COLOURS = ["#393b79", "#637939", "#8c6d31", "#843c39", "#7b4173", "#3182bd", "#e6550d", "#31a354"]
 
@@ -100,8 +104,10 @@ def scatter_stations_by_network(ax, lons, lats, station_ids, *, size=125, marker
     kw = {} if transform is None else {"transform": transform}
     for net in sorted(set(nets)):
         m = np.array([n == net for n in nets])
+        # one station can be listed once per instrument (AV.ANPK..BH and AV.ANPK..EH): count NET.STA once
+        n_sta = len({".".join(str(i).split(".")[:2]) for i, keep in zip(ids, m) if keep})
         ax.scatter(lons[m], lats[m], s=size, marker=marker, facecolor=network_colour(net),
-                   edgecolor="w", linewidth=0.5, label=f"{net} ({int(m.sum())} stations)", **kw)
+                   edgecolor="w", linewidth=0.5, label=f"{net} ({n_sta} station{'s' if n_sta != 1 else ''})", **kw)
 
 
 # ============================================================
@@ -234,6 +240,23 @@ def load_stations_json(path: Path | str) -> pd.DataFrame:
         raise ValueError("Formato de STATIONS_JSON no reconocido")
 
     return df
+
+
+def stations_with_picks(picks_csv, event_ids=None, id_col="id", event_col="event_id_mapped"):
+    """
+    Pick counts per station (NET.STA) in the cleaned picks of a run (merged/input/<namebase>_picks_cleaned.csv).
+
+    event_ids: only picks of these events (e.g. the event_id column of the located catalog);
+    None = every associated pick. A station listed in the station file but missing here was
+    never used: PhaseNet picked nothing on it, or GaMMA associated none of its picks.
+    Returns a Series {NET.STA: number of picks}, largest first.
+    """
+    picks = pd.read_csv(picks_csv, usecols=[id_col, event_col])
+    if event_ids is not None:
+        keep = set(pd.to_numeric(pd.Series(list(event_ids)), errors="coerce").dropna().astype(int))
+        picks = picks[pd.to_numeric(picks[event_col], errors="coerce").isin(keep)]
+    net_sta = picks[id_col].astype(str).str.split(".").str[:2].str.join(".")
+    return net_sta.value_counts()
 
 
 def ensure_dir(path: Path | str) -> Path:
@@ -735,7 +758,8 @@ def plot_mapview_basemap_stations(
     # ESRI shaded-relief tiles with download timeout, retries and disk cache (see _shaded_relief_tile_class)
     ShadedReliefESRI = _shaded_relief_tile_class()
 
-    # Use catalog ONLY to keep the exact same map bounds
+    # The map covers every station and every event (plus pad_lon / pad_lat degrees): with the
+    # events alone, as before, a catalog cut to a small radius hid the farther stations
     # catc / stc map other column names (e.g. a USGS catalog) onto the default ones
     quakes_for_map = make_quakes_for_map(catalog, start, end, catc=catc)
     stations_wide = make_stations_wide_for_map(stations, stc=stc)
@@ -743,10 +767,12 @@ def plot_mapview_basemap_stations(
     if quakes_for_map.empty:
         raise ValueError("No events to compute the map extent.")
 
-    minlon = float(quakes_for_map["lon"].min()) - float(pad_lon)
-    maxlon = float(quakes_for_map["lon"].max()) + float(pad_lon)
-    minlat = float(quakes_for_map["lat"].min()) - float(pad_lat)
-    maxlat = float(quakes_for_map["lat"].max()) + float(pad_lat)
+    all_lon = np.concatenate([quakes_for_map["lon"].to_numpy(float), stations_wide.loc["longitude"].to_numpy(float)])
+    all_lat = np.concatenate([quakes_for_map["lat"].to_numpy(float), stations_wide.loc["latitude"].to_numpy(float)])
+    minlon = float(np.nanmin(all_lon)) - float(pad_lon)
+    maxlon = float(np.nanmax(all_lon)) + float(pad_lon)
+    minlat = float(np.nanmin(all_lat)) - float(pad_lat)
+    maxlat = float(np.nanmax(all_lat)) + float(pad_lat)
     extent = (minlon, maxlon, minlat, maxlat)
 
     center_lon = (minlon + maxlon) / 2
@@ -9197,6 +9223,7 @@ _style_3d_axes = style_3d_axes
 
 
 __all__ = [
+    "stations_with_picks",
     "CatalogCols",
     "StationCols",
     "PicksCols",
