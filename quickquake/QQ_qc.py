@@ -5,6 +5,18 @@ QQ_qc.py
 QC based on the energy-versus-velocity curve using percentiles:
 pc_ratio_energy = P(signal_percentile) / P(noise_percentile)
 
+Station normalization (--station_normalization):
+- "none" (default, the original QC): the curve averages the raw window energy of the
+  stations, in counts^2, so the station with the most counts (the nearest one, the one
+  with the highest gain or the noisiest one) controls the curve.
+- "noise": each station's window energy is first divided by that station's own quiet
+  noise level, so every station is in "times above its own noise" (1 = noise) before the
+  stations are averaged. This is how waveform-stacking location methods treat stations:
+  they never stack raw amplitudes but per-station normalized characteristic functions,
+  most often STA/LTA, i.e. signal over the station's own recent noise (Kao & Shan 2004;
+  Grigoli et al. 2013; QuakeMigrate; review in Li et al. 2020, Rev. Geophys.,
+  doi:10.1029/2019RG000667).
+
 - Input:
     merged/output/{namebase}_hypodd_catalog.csv
     merged/input/{namebase}_picks_cleaned.csv
@@ -58,6 +70,15 @@ EPS = 1e-12               # numerical safety term (internal)
 MAX_EVENTS = 0            # --max_events: 0 = all events
 
 MIN_TOTAL_STATIONS = 4    # --min_total_stations
+
+STATION_NORMALIZATION = "none"  # --station_normalization: "none" (raw counts) or "noise"
+NOISE_WINDOW_S = 300.0    # --noise_window_s: seconds before origin where the quiet noise level is measured
+NOISE_QUANTILE = 20.0     # --noise_quantile: quiet level = this percentile of the window energies there.
+                          # A low percentile is the calm part of those minutes: the coda of an earlier
+                          # earthquake (swarms) or a passing noise burst barely moves it.
+TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" mode (internal)
+GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
+                          # gaps are filled when the chunk is merged and have ~0 energy after filtering
 
 CHUNK_RE = re.compile(r"^\d{8}T\d{6}$")
 
@@ -259,6 +280,37 @@ def window_energy_stat(tr: obspy.Trace, t_abs: UTCDateTime, win_len_s: float, en
     return float(val)
 
 
+def quiet_noise_level(
+    tr: obspy.Trace,
+    t0: UTCDateTime,
+    window_s: float,
+    win_len_s: float,
+    quantile: float,
+    energy_type: str = "squared_median",
+) -> Tuple[float, str]:
+    """
+    Quiet noise level of one station before the origin time, in the same units as
+    window_energy_stat: the `quantile` percentile of the window energies (windows of
+    `win_len_s`) over the `window_s` seconds before origin. The last window ends 1 s
+    before origin, so no energy of this event enters. Windows in data gaps are dropped.
+    Returns (level, "ok") or (nan, reason).
+    """
+    starts = np.arange(-float(window_s), -float(win_len_s) - 1.0, float(win_len_s))
+    energies = np.array([
+        window_energy_stat(tr, t0 + s + 0.5 * float(win_len_s), float(win_len_s), energy_type)
+        for s in starts
+    ])
+    if energies.size == 0 or not np.any(energies > 0.0):
+        return float("nan"), "noise_no_data"
+
+    typical = float(np.median(energies[energies > 0.0]))
+    not_gap = energies[energies > GAP_FRACTION * typical]
+    if not_gap.size < 0.5 * energies.size:
+        return float("nan"), "noise_mostly_gaps"
+
+    return float(np.percentile(not_gap, float(quantile))), "ok"
+
+
 def safe_percentile(x: np.ndarray, p: float) -> float:
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -385,6 +437,9 @@ def qc_one_event(
     vmax_signal: float = VMAX_SIGNAL,
     pad_neighbors: bool = PAD_NEIGHBORS,
     geom_correction: bool = GEOM_CORRECTION,
+    station_normalization: str = STATION_NORMALIZATION,
+    noise_window_s: float = NOISE_WINDOW_S,
+    noise_quantile: float = NOISE_QUANTILE,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -397,8 +452,17 @@ def qc_one_event(
     ev_depth_km = float(row_event.get("depth_km", 0.0))
     eid = int(row_event["event_id"])
 
-    t_start = t0 - float(pre_s)
-    t_end = t0 + float(post_s)
+    by_noise = station_normalization == "noise"
+    if by_noise:
+        # The quiet noise level needs the minutes before origin; the taper is kept short (seconds,
+        # not a fraction of this longer trace) and the energy windows stay out of it.
+        t_start = t0 - float(noise_window_s) - TAPER_S
+        t_end = t0 + float(post_s)
+        t_last = t_end - TAPER_S
+    else:
+        t_start = t0 - float(pre_s)
+        t_end = t0 + float(post_s)
+        t_last = t_end
 
     stations_with_picks = event_to_station_ids.get(eid, [])
     if len(stations_with_picks) == 0:
@@ -416,7 +480,8 @@ def qc_one_event(
     if st_raw is None:
         return build_skip_result(eid, "no_waveforms_loaded")
 
-    prepped: Dict[str, Tuple[obspy.Trace, float]] = {}
+    prepped: Dict[str, Tuple[obspy.Trace, float, float]] = {}
+    dropped: Dict[str, str] = {}   # station -> why it was left out ("noise" mode)
     for sid, dkm in dist_map.items():
         parts = sid.split(".")
         if len(parts) < 2:
@@ -434,7 +499,10 @@ def qc_one_event(
         tr = tr_list[0].copy()
         tr.trim(t_start, t_end, pad=True, fill_value=0)
         tr.detrend("demean")
-        tr.taper(max_percentage=0.05, type="cosine")
+        if by_noise:
+            tr.taper(max_percentage=0.05, type="cosine", max_length=TAPER_S)
+        else:
+            tr.taper(max_percentage=0.05, type="cosine")
 
         sr = float(tr.stats.sampling_rate)
         nyq = 0.5 * sr
@@ -443,7 +511,16 @@ def qc_one_event(
         if fmax > fmin:
             tr.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
 
-        prepped[sid] = (tr, float(dkm))
+        noise_level = 1.0
+        if by_noise:
+            noise_level, why = quiet_noise_level(
+                tr, t0, noise_window_s, winlen, noise_quantile, energy_type=energy_type,
+            )
+            if why != "ok":
+                dropped[f"{net}.{sta}"] = why
+                continue
+
+        prepped[sid] = (tr, float(dkm), float(noise_level))
 
     if len(prepped) < int(min_total_stations):
         return build_skip_result(eid, "too_few_prepped_stations")
@@ -457,13 +534,13 @@ def qc_one_event(
         Ev_sum = 0.0
         n_valid = 0
 
-        for _, (tr, dkm) in prepped.items():
+        for _, (tr, dkm, noise_level) in prepped.items():
             t_abs = t0 + (dkm * inv_v)
 
-            if (t_abs - half) < t_start or (t_abs + half) > t_end:
+            if (t_abs - half) < t_start or (t_abs + half) > t_last:
                 continue
 
-            
+
             E = window_energy_stat(
                 tr,
                 t_abs,
@@ -475,6 +552,9 @@ def qc_one_event(
 
             if geom_correction:
                 E *= (dkm ** 2)
+
+            # "noise" mode: times above this station's own quiet level (1 = its noise)
+            E /= noise_level
 
             Ev_sum += E
             n_valid += 1
@@ -549,7 +629,8 @@ def qc_one_event(
         )
 
         ax.set_xlabel("Velocity (km/s)", fontsize=label_fontsize, labelpad=10)
-        ax.set_ylabel("Stacked Energy", fontsize=label_fontsize, labelpad=10)
+        ax.set_ylabel("Stacked Energy / noise" if by_noise else "Stacked Energy",
+                      fontsize=label_fontsize, labelpad=10)
 
         ax.tick_params(
             axis="both",
@@ -591,12 +672,17 @@ def qc_one_event(
 
         plt.close(fig)
 
-    return {
+    result = {
         "event_id": eid,
         "pc_ratio_energy": float(ratio),
         "qc_status": "computed",
         "qc_reason": "computed",
     }
+    if by_noise:
+        # which stations entered the curve, and which were left out and why (for checking)
+        result["qc_n_stations"] = len(prepped)
+        result["qc_stations_dropped"] = ";".join(f"{k}:{v}" for k, v in sorted(dropped.items()))
+    return result
 
 
 # -------------------------
@@ -667,6 +753,16 @@ def main():
                     help="Multiply window energy by distance^2 (geometric spreading correction)")
     ap.add_argument("--max_events", type=int, default=MAX_EVENTS,
                     help="Process only the first N events; 0 = all (default: 0)")
+    ap.add_argument("--station_normalization", choices=["none", "noise"], default=STATION_NORMALIZATION,
+                    help="'none': average raw window energies (counts^2), the original QC; "
+                         "'noise': divide each station's energies by its own quiet noise level first "
+                         f"(default: {STATION_NORMALIZATION})")
+    ap.add_argument("--noise_window_s", type=float, default=NOISE_WINDOW_S,
+                    help="'noise' mode: seconds before origin where the quiet noise level is measured "
+                         f"(default: {NOISE_WINDOW_S})")
+    ap.add_argument("--noise_quantile", type=float, default=NOISE_QUANTILE,
+                    help="'noise' mode: the quiet level is this percentile of the window energies "
+                         f"in that time (default: {NOISE_QUANTILE})")
 
     args = ap.parse_args()
     min_total_stations = int(args.min_total_stations)
@@ -730,6 +826,9 @@ def main():
             vmax_signal=args.vmax_signal,
             pad_neighbors=not args.no_pad_neighbors,
             geom_correction=args.geom_correction,
+            station_normalization=args.station_normalization,
+            noise_window_s=args.noise_window_s,
+            noise_quantile=args.noise_quantile,
         )
 
         rows.append(r)
@@ -750,8 +849,10 @@ def main():
         qc_merge["event_id"] = pd.to_numeric(qc_merge["event_id"], errors="coerce").astype("Int64")
         qc_merge["pc_ratio_energy"] = pd.to_numeric(qc_merge["pc_ratio_energy"], errors="coerce").round(2)
 
+        qc_cols = ["event_id", "pc_ratio_energy", "qc_status", "qc_reason"]
+        qc_cols += [c for c in ("qc_n_stations", "qc_stations_dropped") if c in qc_merge.columns]
         raw_out = raw_out.merge(
-            qc_merge[["event_id", "pc_ratio_energy", "qc_status", "qc_reason"]],
+            qc_merge[qc_cols],
             left_on="_event_id_num",
             right_on="event_id",
             how="left",
@@ -820,6 +921,13 @@ def main():
     if len(skipped) > 0:
         print("\nTop skipped reasons:")
         print(skipped["qc_reason"].value_counts().to_string())
+
+    if "qc_stations_dropped" in raw_out.columns:
+        reasons = raw_out["qc_stations_dropped"].dropna().astype(str).str.split(";").explode()
+        reasons = reasons[reasons.str.len() > 0].str.split(":").str[-1]
+        if len(reasons) > 0:
+            print("\nStations left out of an event's curve ('noise' mode), by reason:")
+            print(reasons.value_counts().to_string())
 
 
 if __name__ == "__main__":
