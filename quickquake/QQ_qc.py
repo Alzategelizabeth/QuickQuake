@@ -465,9 +465,8 @@ def qc_one_event(
     if by_noise:
         # The quiet noise level needs the minutes before origin; the taper is kept short (seconds,
         # not a fraction of this longer trace) and the energy windows stay out of it.
+        # t_end and t_last are set below, once the station distances are known.
         t_start = t0 - float(noise_window_s) - TAPER_S
-        t_end = t0 + float(post_s)
-        t_last = t_end - TAPER_S
     else:
         t_start = t0 - float(pre_s)
         t_end = t0 + float(post_s)
@@ -484,6 +483,14 @@ def qc_one_event(
     dist_map = {sid: dist_map_all[sid] for sid in stations_with_picks if sid in dist_map_all}
     if len(dist_map) < int(min_total_stations):
         return build_skip_result(eid, "too_few_stations_in_metadata")
+
+    if by_noise:
+        # Every station enters every point of the curve: read far enough after origin for the
+        # farthest station's window at the slowest test velocity. With a fixed post_s, far
+        # stations drop out at slow velocities and the curve jumps where the set of stations changes.
+        reach_s = max(dist_map.values()) / float(np.min(v_grid)) + 0.5 * float(winlen)
+        t_last = t0 + max(float(post_s), reach_s)
+        t_end = t_last + TAPER_S
 
     st_raw, files = cache.get_stream(t_start, t_end, times, dirs, pad_neighbors=pad_neighbors)
     if st_raw is None:
