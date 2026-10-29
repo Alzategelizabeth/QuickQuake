@@ -1569,6 +1569,88 @@ def plot_timeline_legend_only(
     return fig, ax
 
 
+def plot_eruption_history(
+    eruption_years: Sequence[str],
+    other_years: Sequence[str] = (),
+    *,
+    labels: Tuple[str, str] = ("Eruption", "Non-eruptive activity"),
+    xlim_years: Optional[Tuple[str, str]] = None,
+    colors: Tuple[str, str] = ("tab:red", "tab:blue"),
+    markers: Tuple[str, str] = ("o", "^"),
+    marker_size: float = 10.0,
+    tick_fontsize: int = 12,
+    legend_fontsize: int = 10,
+    year_step: int = 10,
+    figsize: Tuple[float, float] = (7.0, 2.5),
+    savefig: bool = False,
+    out_png: Optional[str] = None,
+    dpi: int = 600,
+    show: bool = False,
+):
+    """
+    Stem timeline of a volcano's reported activity (from timeline.ipynb, the poster figure).
+
+    eruption_years: years ("1931") drawn above the axis; other_years: years drawn below it
+    (e.g. non-eruptive unrest). A year can repeat; the stems alternate between three heights
+    so that close years do not overlap. xlim_years = ("1930", "2025"); None = the data range
+    padded by 5 years.
+
+    Returns fig, ax.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from datetime import datetime
+
+    groups = [
+        [datetime.strptime(str(y), "%Y") for y in eruption_years],
+        [datetime.strptime(str(y), "%Y") for y in other_years],
+    ]
+    if not groups[0] and not groups[1]:
+        raise ValueError("No years to draw: give eruption_years and/or other_years.")
+
+    if xlim_years is None:
+        all_years = [d.year for g in groups for d in g]
+        xlim = [datetime(min(all_years) - 5, 1, 1), datetime(max(all_years) + 5, 1, 1)]
+    else:
+        xlim = [datetime.strptime(str(y), "%Y") for y in xlim_years]
+
+    # stems above the axis for eruptions, below for the other activity (arbitrary units)
+    levels_by_group = ([7, 5, 3], [-7, -5, -3])
+
+    fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+    ax.set_xlim(xlim)
+
+    for dates, levels0, color, marker, label in zip(groups, levels_by_group, colors, markers, labels):
+        if not dates:
+            continue
+        levels = np.tile(levels0, int(np.ceil(len(dates) / len(levels0))))[:len(dates)]
+        ax.plot(dates, levels, marker, color=color, label=label, markersize=marker_size,
+                markeredgewidth=1.8, linestyle="None")
+        ax.vlines(dates, 0, levels, color=color, lw=1.8)
+
+    ax.plot(xlim, [0, 0], "k-", lw=2.5, alpha=0.7)
+
+    ax.xaxis.set_major_locator(mdates.YearLocator(int(year_step)))
+    ax.xaxis.set_minor_locator(mdates.YearLocator(max(1, int(year_step) // 2)))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    plt.setp(ax.get_xticklabels(), rotation=0, ha="center", fontsize=int(tick_fontsize))
+
+    ax.legend(ncol=1, fontsize=int(legend_fontsize), loc="upper right", bbox_to_anchor=(1.0, 1.0),
+              borderaxespad=0.0, frameon=False)
+    ax.set_ylim([-10, 10])
+    ax.yaxis.set_visible(False)
+    ax.spines[["left", "top", "right"]].set_visible(False)
+    ax.margins(y=0.1)
+
+    if savefig and out_png:
+        fig.savefig(out_png, dpi=int(dpi), bbox_inches="tight")
+        print(f"[ok] saved: {out_png}")
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
 # ============================================================
 # ELEVATION GRID (topography + bathymetry) WITHOUT GMT
 # ============================================================
@@ -3205,6 +3287,327 @@ def plot_magnitude_time(
 
 
 # ============================================================
+# CATALOG SUMMARY AND TEMPORAL EVOLUTION (paper 2, estadisticas)
+# ============================================================
+
+def _distance_to_center_km(df, center_lat, center_lon, lat_col="latitude", lon_col="longitude"):
+    """
+    Horizontal distance in km from each event to the region centre, on the WGS84 ellipsoid
+    (ObsPy gps2dist_azimuth), as in filter_catalog_by_radius, so the same events count as
+    inside RADIUS_KM everywhere.
+    """
+    from obspy.geodetics.base import gps2dist_azimuth
+
+    lats = pd.to_numeric(df[lat_col], errors="coerce").to_numpy(float)
+    lons = pd.to_numeric(df[lon_col], errors="coerce").to_numpy(float)
+    return np.array([
+        gps2dist_azimuth(center_lat, center_lon, la, lo)[0] / 1000.0 if np.isfinite(la) and np.isfinite(lo) else np.nan
+        for la, lo in zip(lats, lons)
+    ])
+
+
+def catalog_stage_counts(
+    stage_csvs,
+    *,
+    center_lat=None,
+    center_lon=None,
+    radius_km=None,
+    start=None,
+    end=None,
+):
+    """
+    Number of events at each pipeline stage, in the time window and within radius_km.
+
+    stage_csvs: {label: (csv_path, stage)} in pipeline order, stage = "gamma", "hypoinv" or
+    "hypodd" (the column layout, see _prep_location_stage); the QC-filtered catalog has the
+    "hypodd" layout. Missing files are skipped. start / end (UTC strings) and radius_km
+    (needs center_lat / center_lon) are optional cuts.
+
+    Returns a table with, per stage: n_total (whole file), n_selected (after the cuts) and
+    kept_of_previous (n_selected / n_selected of the previous stage).
+    """
+    rows = []
+    previous = None
+    for label, (csv_path, stage) in stage_csvs.items():
+        if csv_path is None or not Path(csv_path).exists():
+            continue
+        df = _prep_location_stage(pd.read_csv(csv_path), stage)
+        n_total = len(df)
+        if start is not None:
+            df = df[df["time"] >= pd.to_datetime(start, utc=True)]
+        if end is not None:
+            df = df[df["time"] <= pd.to_datetime(end, utc=True)]
+        if radius_km is not None:
+            if center_lat is None or center_lon is None:
+                raise ValueError("radius_km needs center_lat and center_lon.")
+            df = df[_distance_to_center_km(df, center_lat, center_lon) <= float(radius_km)]
+        n_sel = len(df)
+        rows.append({
+            "stage": label,
+            "n_total": n_total,
+            "n_selected": n_sel,
+            "kept_of_previous": (n_sel / previous) if previous else np.nan,
+        })
+        previous = n_sel
+    return pd.DataFrame(rows)
+
+
+def catalog_summary_table(catalog, *, catc: Optional[CatalogCols] = None, center_lat=None, center_lon=None):
+    """
+    One-column summary of a catalog: time span, depth and magnitude statistics, events above
+    sea level (negative depth) and, with a centre, the distance to it (estadisticas section 2).
+    """
+    if catc is None:
+        catc = CatalogCols()
+    t = pd.to_datetime(catalog[catc.time], utc=True, errors="coerce", format="mixed")
+    depth = pd.to_numeric(catalog[catc.depth_km], errors="coerce")
+    mag = pd.to_numeric(catalog[catc.mag], errors="coerce")
+
+    out = {
+        "n_events": len(catalog),
+        "start_time": t.min(),
+        "end_time": t.max(),
+        "duration_days": (t.max() - t.min()).total_seconds() / 86400.0 if t.notna().sum() > 1 else np.nan,
+        "depth_mean_km": depth.mean(),
+        "depth_median_km": depth.median(),
+        "depth_std_km": depth.std(),
+        "depth_min_km": depth.min(),
+        "depth_max_km": depth.max(),
+        "n_above_sea_level": int((depth < 0).sum()),
+        "magnitude_mean": mag.mean(),
+        "magnitude_median": mag.median(),
+        "magnitude_std": mag.std(),
+        "magnitude_min": mag.min(),
+        "magnitude_max": mag.max(),
+    }
+    if center_lat is not None and center_lon is not None:
+        r = _distance_to_center_km(catalog, center_lat, center_lon, catc.lat, catc.lon)
+        out["distance_to_center_median_km"] = float(np.nanmedian(r))
+        out["distance_to_center_max_km"] = float(np.nanmax(r))
+    return pd.Series(out).to_frame("value")
+
+
+def plot_depth_magnitude_distributions(
+    catalog,
+    *,
+    catc: Optional[CatalogCols] = None,
+    depth_bin_km=0.5,
+    mag_bin_width=0.1,
+    figsize=(17, 5),
+    show=False,
+):
+    """
+    (a) depth histogram, (b) magnitude histogram, (c) magnitude against depth with the
+    Spearman rank correlation (estadisticas section 5). Depth is km below sea level, so
+    events above sea level have negative depths and are kept.
+
+    Returns fig, axes, {"depth": describe table, "magnitude": describe table,
+    "spearman_rho", "spearman_p"}.
+    """
+    import matplotlib.pyplot as plt
+    from scipy.stats import spearmanr
+
+    if catc is None:
+        catc = CatalogCols()
+    depth = pd.to_numeric(catalog[catc.depth_km], errors="coerce")
+    mag = pd.to_numeric(catalog[catc.mag], errors="coerce")
+    both = depth.notna() & mag.notna()
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    d = depth.dropna()
+    depth_edges = np.arange(np.floor(d.min() / depth_bin_km) * depth_bin_km,
+                            d.max() + depth_bin_km, depth_bin_km)
+    axes[0].hist(d, bins=depth_edges, color="0.35")
+    axes[0].axvline(0.0, color="k", lw=0.8, ls="--")
+    axes[0].set_xlabel("Depth below sea level (km)")
+    axes[0].set_ylabel("Events")
+    axes[0].set_title("(a) Depth", loc="left", fontweight="bold")
+
+    m = mag.dropna()
+    mag_edges = np.arange(np.floor(m.min() / mag_bin_width) * mag_bin_width,
+                          m.max() + mag_bin_width, mag_bin_width)
+    axes[1].hist(m, bins=mag_edges, color="0.35")
+    axes[1].set_xlabel("Magnitude")
+    axes[1].set_ylabel("Events")
+    axes[1].set_title("(b) Magnitude", loc="left", fontweight="bold")
+
+    rho, p = (spearmanr(mag[both], depth[both]) if both.sum() >= 3 else (np.nan, np.nan))
+    axes[2].scatter(mag[both], depth[both], s=4, color="0.25", alpha=0.4, linewidths=0)
+    axes[2].invert_yaxis()
+    axes[2].set_xlabel("Magnitude")
+    axes[2].set_ylabel("Depth below sea level (km)")
+    axes[2].set_title(f"(c) Magnitude vs depth (Spearman ρ = {rho:.2f})", loc="left", fontweight="bold")
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+
+    pct = [0.1, 0.25, 0.5, 0.75, 0.9]
+    stats = {
+        "depth": depth.describe(percentiles=pct).to_frame("depth_km"),
+        "magnitude": mag.describe(percentiles=pct).to_frame("magnitude"),
+        "spearman_rho": float(rho),
+        "spearman_p": float(p),
+    }
+    return fig, axes, stats
+
+
+def plot_depth_distance_through_time(
+    catalog,
+    *,
+    center_lat,
+    center_lon,
+    catc: Optional[CatalogCols] = None,
+    start=None,
+    end=None,
+    depth_max_km=None,
+    marker_size=6.0,
+    figsize=(14, 8),
+    show=False,
+):
+    """
+    (a) depth of each event through time, coloured by magnitude; (b) its horizontal distance
+    to the region centre through time, coloured by depth (estadisticas section 7).
+
+    Returns fig, axes, a monthly table (count, median depth, median distance).
+    """
+    import matplotlib.pyplot as plt
+
+    if catc is None:
+        catc = CatalogCols()
+    df = catalog.copy()
+    df["_t"] = pd.to_datetime(df[catc.time], utc=True, errors="coerce", format="mixed")
+    df["_depth"] = pd.to_numeric(df[catc.depth_km], errors="coerce")
+    df["_mag"] = pd.to_numeric(df[catc.mag], errors="coerce")
+    df = df.dropna(subset=["_t", "_depth"])
+    if start is not None:
+        df = df[df["_t"] >= pd.to_datetime(start, utc=True)]
+    if end is not None:
+        df = df[df["_t"] <= pd.to_datetime(end, utc=True)]
+    df["_dist"] = _distance_to_center_km(df, center_lat, center_lon, catc.lat, catc.lon)
+    df = df.sort_values("_t")
+
+    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    sc0 = axes[0].scatter(df["_t"], df["_depth"], c=df["_mag"], cmap="viridis", s=marker_size,
+                          linewidths=0, alpha=0.8)
+    axes[0].invert_yaxis()
+    if depth_max_km is not None:
+        axes[0].set_ylim(float(depth_max_km), min(df["_depth"].min(), 0.0) - 0.5)
+    axes[0].set_ylabel("Depth below sea level (km)")
+    axes[0].set_title("(a) Depth through time", loc="left", fontweight="bold")
+    fig.colorbar(sc0, ax=axes[0], pad=0.01).set_label("Magnitude")
+
+    sc1 = axes[1].scatter(df["_t"], df["_dist"], c=df["_depth"], cmap="inferno_r", s=marker_size,
+                          linewidths=0, alpha=0.8)
+    axes[1].set_ylabel("Distance to centre (km)")
+    axes[1].set_xlabel("Time")
+    axes[1].set_title("(b) Distance to the region centre through time", loc="left", fontweight="bold")
+    fig.colorbar(sc1, ax=axes[1], pad=0.01).set_label("Depth (km)")
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+
+    month = df["_t"].dt.tz_convert(None).dt.to_period("M").astype(str)
+    monthly = df.groupby(month).agg(
+        n_events=("_t", "size"),
+        median_depth_km=("_depth", "median"),
+        median_distance_km=("_dist", "median"),
+    )
+    monthly.index.name = "month"
+    return fig, axes, monthly
+
+
+def plot_interevent_times(catalog, *, catc: Optional[CatalogCols] = None, n_bins=50, figsize=(8, 5), show=False):
+    """
+    Histogram of the time between consecutive events (estadisticas section 7), on
+    log-spaced bins: over several years the gaps go from seconds to months, and linear
+    bins (as in the old notebook) put almost every event in the first bin.
+
+    Returns fig, ax, describe table of the gaps in hours.
+    """
+    import matplotlib.pyplot as plt
+
+    if catc is None:
+        catc = CatalogCols()
+    t = pd.to_datetime(catalog[catc.time], utc=True, errors="coerce", format="mixed").dropna().sort_values()
+    dt_h = t.diff().dt.total_seconds().dropna() / 3600.0
+    dt_pos = dt_h[dt_h > 0]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    edges = np.logspace(np.log10(dt_pos.min()), np.log10(dt_pos.max()), int(n_bins))
+    ax.hist(dt_pos, bins=edges, color="0.35")
+    ax.set_xscale("log")
+    ax.set_xlabel("Time between consecutive events (hours)")
+    ax.set_ylabel("Events")
+    ax.set_title(f"Inter-event times (median {dt_h.median():.2f} h)")
+    plt.tight_layout()
+    if show:
+        plt.show()
+
+    return fig, ax, dt_h.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).to_frame("dt_hours")
+
+
+def weekly_screening_table(
+    catalog,
+    *,
+    center_lat,
+    center_lon,
+    catc: Optional[CatalogCols] = None,
+    freq="W",
+    shallow_km=3.0,
+    near_km=20.0,
+    fi_col="FI",
+):
+    """
+    One row per week (freq) with counts, depth and magnitude statistics, the fraction of
+    shallow events (depth <= shallow_km), the fraction within near_km of the centre and the
+    number of FI classes (if fi_col exists), ranked by a screening score (estadisticas
+    section 9). The score is the sum of the percentile ranks of n_events, max_magnitude,
+    shallow_fraction, near_center_fraction and n_FI_classes: a ranking aid to decide which
+    weeks to look at first, not a physical quantity. With a catalog already cut to
+    RADIUS_KM and near_km = RADIUS_KM, near_center_fraction is 1 in every week and does not
+    change the ranking; a smaller near_km ranks by concentration near the vent.
+
+    Returns the table sorted by screening_score (highest first).
+    """
+    if catc is None:
+        catc = CatalogCols()
+    df = catalog.copy()
+    df["_t"] = pd.to_datetime(df[catc.time], utc=True, errors="coerce", format="mixed")
+    df = df.dropna(subset=["_t"])
+    df["_depth"] = pd.to_numeric(df[catc.depth_km], errors="coerce")
+    df["_mag"] = pd.to_numeric(df[catc.mag], errors="coerce")
+    df["_week"] = df["_t"].dt.tz_convert(None).dt.to_period(freq).dt.start_time
+    df["_shallow"] = df["_depth"] <= float(shallow_km)
+    df["_near"] = _distance_to_center_km(df, center_lat, center_lon, catc.lat, catc.lon) <= float(near_km)
+
+    agg = dict(
+        n_events=("_t", "size"),
+        mean_depth_km=("_depth", "mean"),
+        median_depth_km=("_depth", "median"),
+        std_depth_km=("_depth", "std"),
+        mean_magnitude=("_mag", "mean"),
+        max_magnitude=("_mag", "max"),
+        shallow_fraction=("_shallow", "mean"),
+        near_center_fraction=("_near", "mean"),
+    )
+    has_fi = fi_col in df.columns
+    if has_fi:
+        agg["n_FI_classes"] = (fi_col, "nunique")
+    weekly = df.groupby("_week").agg(**agg)
+    weekly.index.name = "week"
+
+    score_cols = ["n_events", "max_magnitude", "shallow_fraction", "near_center_fraction"]
+    if has_fi:
+        score_cols.append("n_FI_classes")
+    weekly["screening_score"] = sum(weekly[c].rank(pct=True).fillna(0) for c in score_cols)
+    return weekly.sort_values(["screening_score", "n_events", "max_magnitude"], ascending=False)
+
+
+# ============================================================
 # LOCATION CHANGES BETWEEN PIPELINE STAGES (GaMMA -> HypoInverse -> HypoDD)
 # ============================================================
 
@@ -3923,6 +4326,65 @@ def plot_monthly_fi_span_legend_only(
     if show:
         plt.show()
     return fig, ax
+
+
+def plot_fi_class_statistics(
+    df_fi,
+    *,
+    catc: Optional[CatalogCols] = None,
+    fi_col="FI",
+    fi_order=("VT", "LP", "NS"),
+    fi_colors=None,
+    figsize=(17, 5),
+    show=False,
+):
+    """
+    (a) number of events per FI class, (b) depth and (c) magnitude by FI class as box plots
+    (estadisticas sections 3 and 5). Classes not in fi_order are added after it.
+
+    Returns fig, axes, {"counts": table, "depth": table, "magnitude": table}.
+    """
+    import matplotlib.pyplot as plt
+
+    if catc is None:
+        catc = CatalogCols()
+    fi_colors = fi_colors or FI_COMPOSITION_COLORS
+    df = df_fi.copy()
+    df[fi_col] = df[fi_col].astype(str).str.strip().str.upper()
+    df["_depth"] = pd.to_numeric(df[catc.depth_km], errors="coerce")
+    df["_mag"] = pd.to_numeric(df[catc.mag], errors="coerce")
+
+    present = list(df[fi_col].dropna().unique())
+    order = [c for c in fi_order if c in present] + sorted(c for c in present if c not in fi_order)
+    colors = [fi_colors.get(c, "0.6") for c in order]
+
+    counts = df[fi_col].value_counts().reindex(order).rename("count").to_frame()
+    counts["percent"] = 100.0 * counts["count"] / counts["count"].sum()
+
+    def by_class(col):
+        return df.groupby(fi_col)[col].agg(["count", "mean", "median", "std", "min", "max"]).reindex(order)
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    axes[0].bar(order, counts["count"], color=colors)
+    axes[0].set_ylabel("Events")
+    axes[0].set_title("(a) Events per FI class", loc="left", fontweight="bold")
+
+    for ax, col, label, letter in [(axes[1], "_depth", "Depth below sea level (km)", "b"),
+                                   (axes[2], "_mag", "Magnitude", "c")]:
+        data = [df.loc[df[fi_col] == c, col].dropna().to_numpy() for c in order]
+        bp = ax.boxplot(data, labels=order, patch_artist=True, showfliers=True,
+                        flierprops=dict(markersize=2, alpha=0.4))
+        for patch, color in zip(bp["boxes"], colors):
+            patch.set_facecolor(color)
+        ax.set_ylabel(label)
+        ax.set_title(f"({letter}) {label.split(' ')[0]} by FI class", loc="left", fontweight="bold")
+    axes[1].invert_yaxis()
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+
+    return fig, axes, {"counts": counts, "depth": by_class("_depth"), "magnitude": by_class("_mag")}
 
 
 # ============================================================
@@ -6428,6 +6890,306 @@ def plot_cluster_surfaces_interactive(
 
 
 # ============================================================
+# TWO PLANES FROM HAND-DRAWN SEED VOLUMES (paper 2, planos0.0)
+# ============================================================
+# The user draws two seed volumes (vertices lon, lat, depth_km) around two groups of events
+# seen in the 3-D view. Each group gets a total-least-squares (TLS) plane; events of a
+# looser box around both seeds are then given to the closer plane, and the planes are
+# refitted until the labels stop changing. Coordinates are local km (x east, y north,
+# z depth positive down) around the mean of the seed vertices.
+
+def fit_plane_tls(points_xyz, lon_ref, lat_ref):
+    """
+    Total-least-squares plane through points (lon, lat, depth_km): SVD of the centred
+    local-km coordinates; the normal (smallest singular vector) points downward.
+    Returns the fit dict used by the two-plane functions (P, centroid, e1, e2, normal, d,
+    lon_ref, lat_ref, rms in km, u_bounds, v_bounds).
+    """
+    points_xyz = np.asarray(points_xyz, dtype=float)
+    x, y = lonlat_to_local_km(points_xyz[:, 0], points_xyz[:, 1], lon_ref, lat_ref)
+    P = np.column_stack([x, y, points_xyz[:, 2]])
+
+    centroid = P.mean(axis=0)
+    Q = P - centroid
+    _, _, Vt = np.linalg.svd(Q, full_matrices=False)
+    e1, e2, n = Vt[0], Vt[1], Vt[2]
+    n = n / np.linalg.norm(n)
+    if n[2] < 0:
+        n = -n
+        e1 = -e1
+
+    dist = Q @ n
+    u = Q @ e1
+    v = Q @ e2
+    return {
+        "P": P,
+        "centroid": centroid,
+        "e1": e1,
+        "e2": e2,
+        "normal": n,
+        "d": -np.dot(n, centroid),
+        "lon_ref": lon_ref,
+        "lat_ref": lat_ref,
+        "rms": float(np.sqrt(np.mean(dist ** 2))),
+        "u_bounds": (u.min(), u.max()),
+        "v_bounds": (v.min(), v.max()),
+    }
+
+
+def points_in_seed_volume(points_xyz, vertices):
+    """True for points (lon, lat, depth_km) inside the convex hull of the seed vertices."""
+    from scipy.spatial import Delaunay
+
+    return Delaunay(np.asarray(vertices, dtype=float)).find_simplex(np.asarray(points_xyz, dtype=float)) >= 0
+
+
+def build_loose_roi_mask(points_xyz, seed_vertices_list, pad_xy_km=5.0, pad_z_km=2.5):
+    """
+    Box around all the seed vertices, padded by pad_xy_km horizontally and pad_z_km in depth.
+    Returns (mask of points inside, lon_ref, lat_ref), with the reference at the mean vertex.
+    """
+    points_xyz = np.asarray(points_xyz, dtype=float)
+    seed_all = np.vstack(seed_vertices_list)
+    lon_ref = seed_all[:, 0].mean()
+    lat_ref = seed_all[:, 1].mean()
+
+    sx, sy = lonlat_to_local_km(seed_all[:, 0], seed_all[:, 1], lon_ref, lat_ref)
+    px, py = lonlat_to_local_km(points_xyz[:, 0], points_xyz[:, 1], lon_ref, lat_ref)
+    mask = (
+        (px >= sx.min() - pad_xy_km) & (px <= sx.max() + pad_xy_km)
+        & (py >= sy.min() - pad_xy_km) & (py <= sy.max() + pad_xy_km)
+        & (points_xyz[:, 2] >= seed_all[:, 2].min() - pad_z_km)
+        & (points_xyz[:, 2] <= seed_all[:, 2].max() + pad_z_km)
+    )
+    return mask, lon_ref, lat_ref
+
+
+def _project_points_to_plane(points_xyz, fit, lon_ref, lat_ref):
+    """In-plane coordinates (u, v), signed distance to the plane and horizontal distance to its centroid (km)."""
+    x, y = lonlat_to_local_km(points_xyz[:, 0], points_xyz[:, 1], lon_ref, lat_ref)
+    P = np.column_stack([x, y, points_xyz[:, 2]])
+    Q = P - fit["centroid"]
+    dxy = np.sqrt((P[:, 0] - fit["centroid"][0]) ** 2 + (P[:, 1] - fit["centroid"][1]) ** 2)
+    return Q @ fit["e1"], Q @ fit["e2"], Q @ fit["normal"], dxy
+
+
+def _plane_patch_mask(u, v, fit, pad_frac=0.35, pad_km=1.0):
+    """Points whose in-plane coordinates fall inside the fitted patch, padded."""
+    umin, umax = fit["u_bounds"]
+    vmin, vmax = fit["v_bounds"]
+    du = max(umax - umin, 1e-6)
+    dv = max(vmax - vmin, 1e-6)
+    return (
+        (u >= umin - pad_frac * du - pad_km) & (u <= umax + pad_frac * du + pad_km)
+        & (v >= vmin - pad_frac * dv - pad_km) & (v <= vmax + pad_frac * dv + pad_km)
+    )
+
+
+def sigma_clip_plane(points_xyz, lon_ref, lat_ref, nsig=2.5, min_abs_km=0.20, max_iter=3):
+    """Refit the TLS plane after dropping points farther than max(nsig * rms, min_abs_km) from it."""
+    pts = np.asarray(points_xyz, dtype=float).copy()
+    for _ in range(max_iter):
+        fit = fit_plane_tls(pts, lon_ref, lat_ref)
+        _, _, dperp, _ = _project_points_to_plane(pts, fit, lon_ref, lat_ref)
+        keep = np.abs(dperp) <= max(nsig * fit["rms"], min_abs_km)
+        if keep.sum() < 3 or keep.sum() == pts.shape[0]:
+            return pts, fit
+        pts = pts[keep]
+    return pts, fit_plane_tls(pts, lon_ref, lat_ref)
+
+
+def _classify_points_two_planes(candidate_xyz, fit1, fit2, lon_ref, lat_ref, max_perp_km=0.90,
+                                uv_pad_frac=0.35, uv_pad_km=1.0, max_xy_km=12.0, cost_xy_weight=0.04):
+    """Label 1 or 2 (the cheaper plane: |distance| + cost_xy_weight * horizontal distance) or -1 (neither)."""
+    u1, v1, d1, dxy1 = _project_points_to_plane(candidate_xyz, fit1, lon_ref, lat_ref)
+    u2, v2, d2, dxy2 = _project_points_to_plane(candidate_xyz, fit2, lon_ref, lat_ref)
+
+    allow1 = (np.abs(d1) <= max_perp_km) & _plane_patch_mask(u1, v1, fit1, uv_pad_frac, uv_pad_km) & (dxy1 <= max_xy_km)
+    allow2 = (np.abs(d2) <= max_perp_km) & _plane_patch_mask(u2, v2, fit2, uv_pad_frac, uv_pad_km) & (dxy2 <= max_xy_km)
+    cost1 = np.abs(d1) + cost_xy_weight * dxy1
+    cost2 = np.abs(d2) + cost_xy_weight * dxy2
+
+    labels = np.full(candidate_xyz.shape[0], -1, dtype=int)
+    labels[allow1 & ~allow2] = 1
+    labels[allow2 & ~allow1] = 2
+    both = allow1 & allow2
+    labels[both] = np.where(cost1[both] <= cost2[both], 1, 2)
+    return labels
+
+
+def refine_two_planes(candidate_xyz, seed1_xyz, seed2_xyz, lon_ref, lat_ref, max_perp_km=0.90,
+                      uv_pad_frac=0.35, uv_pad_km=1.0, max_xy_km=5.0, cost_xy_weight=0.04,
+                      clip_nsig=2.5, clip_min_abs_km=0.20, max_iter=12, verbose=True):
+    """
+    Grow two groups from their seeds: fit (with sigma clipping), give every candidate to the
+    closer plane, repeat until the labels stop changing or max_iter. The final planes are
+    fitted to the candidates labelled 1 and 2 only (the seeds are not added again).
+    Returns (labels of candidate_xyz, fit1, fit2, group1_xyz, group2_xyz).
+    """
+    seed1_xyz = np.asarray(seed1_xyz, dtype=float)
+    seed2_xyz = np.asarray(seed2_xyz, dtype=float)
+    group1, group2 = seed1_xyz.copy(), seed2_xyz.copy()
+    classify = dict(max_perp_km=max_perp_km, uv_pad_frac=uv_pad_frac, uv_pad_km=uv_pad_km,
+                    max_xy_km=max_xy_km, cost_xy_weight=cost_xy_weight)
+    clip = dict(nsig=clip_nsig, min_abs_km=clip_min_abs_km)
+    prev_labels = None
+
+    for it in range(max_iter):
+        group1, fit1 = sigma_clip_plane(group1, lon_ref, lat_ref, **clip)
+        group2, fit2 = sigma_clip_plane(group2, lon_ref, lat_ref, **clip)
+        labels = _classify_points_two_planes(candidate_xyz, fit1, fit2, lon_ref, lat_ref, **classify)
+
+        new_group1 = np.vstack([candidate_xyz[labels == 1], seed1_xyz])
+        new_group2 = np.vstack([candidate_xyz[labels == 2], seed2_xyz])
+        if verbose:
+            print(f"iter {it + 1:02d} | g1={len(new_group1)} | g2={len(new_group2)} | noise={(labels == -1).sum()}")
+        group1, group2 = new_group1, new_group2
+        if prev_labels is not None and np.array_equal(labels, prev_labels):
+            break
+        prev_labels = labels.copy()
+
+    group1, fit1 = sigma_clip_plane(group1, lon_ref, lat_ref, max_iter=4, **clip)
+    group2, fit2 = sigma_clip_plane(group2, lon_ref, lat_ref, max_iter=4, **clip)
+    labels = _classify_points_two_planes(candidate_xyz, fit1, fit2, lon_ref, lat_ref, **classify)
+
+    final_group1, fit1 = sigma_clip_plane(candidate_xyz[labels == 1], lon_ref, lat_ref, max_iter=4, **clip)
+    final_group2, fit2 = sigma_clip_plane(candidate_xyz[labels == 2], lon_ref, lat_ref, max_iter=4, **clip)
+    return labels, fit1, fit2, final_group1, final_group2
+
+
+def plane_intersection_line(fit1, fit2, scale_factor=2.5):
+    """
+    Line where the two planes meet: a point p0 (local km), its unit direction, and the
+    segment end points as lon, lat, depth (scale_factor times the largest extent of the points).
+    """
+    n1, d1 = fit1["normal"], fit1["d"]
+    n2, d2 = fit2["normal"], fit2["d"]
+    direction = np.cross(n1, n2)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-10:
+        raise ValueError("The two planes are nearly parallel.")
+    direction = direction / norm
+    p0 = np.linalg.solve(np.vstack([n1, n2, direction]), np.array([-d1, -d2, 0.0]))
+
+    L = scale_factor * np.max(np.ptp(np.vstack([fit1["P"], fit2["P"]]), axis=0))
+    line_pts = np.vstack([p0 - L * direction, p0 + L * direction])
+    lon_line, lat_line = local_km_to_lonlat(line_pts[:, 0], line_pts[:, 1], fit1["lon_ref"], fit1["lat_ref"])
+    return p0, direction, lon_line, lat_line, line_pts[:, 2]
+
+
+def plane_polygon_from_fit(fit):
+    """
+    Polygon of the plane confined to its points: convex hull of the in-plane (u, v)
+    coordinates, back to lon, lat, depth. Returns lon, lat, depth of the vertices and a fan
+    triangulation (i, j, k) for plotly Mesh3d.
+    """
+    from scipy.spatial import ConvexHull
+
+    P, c, e1, e2 = fit["P"], fit["centroid"], fit["e1"], fit["e2"]
+    uv = np.column_stack([(P - c) @ e1, (P - c) @ e2])
+    if uv.shape[0] < 3:
+        raise ValueError("A plane needs at least 3 points for its polygon.")
+    hull_uv = uv[ConvexHull(uv).vertices]
+    poly_local = np.array([c + uu * e1 + vv * e2 for uu, vv in hull_uv])
+    lon_poly, lat_poly = local_km_to_lonlat(poly_local[:, 0], poly_local[:, 1], fit["lon_ref"], fit["lat_ref"])
+
+    n = len(hull_uv)
+    tri_i = [0] * (n - 2)
+    tri_j = list(range(1, n - 1))
+    tri_k = list(range(2, n))
+    return lon_poly, lat_poly, poly_local[:, 2], tri_i, tri_j, tri_k
+
+
+def fit_two_planes_from_seeds(
+    catalog,
+    seed_vertices_1,
+    seed_vertices_2,
+    *,
+    catc: Optional[CatalogCols] = None,
+    start=None,
+    end=None,
+    roi_pad_xy_km=2.0,
+    roi_pad_z_km=2.0,
+    max_perp_km=0.5,
+    uv_pad_frac=0.35,
+    uv_pad_km=1.5,
+    max_xy_km=5.0,
+    cost_xy_weight=0.03,
+    clip_nsig=5.0,
+    clip_min_abs_km=0.15,
+    max_iter=15,
+    verbose=True,
+):
+    """
+    The planos0.0 workflow on one catalog: seeds = events inside each seed volume, candidates
+    = events in the padded box around both seeds, then refine_two_planes. The defaults are
+    the planos0.0 (paper 2) settings.
+
+    Returns a dict with labels (one per catalog row: 1, 2, -1 noise in the box, 0 outside
+    the box), fit1, fit2, group1_xyz, group2_xyz, n_seed1, n_seed2, n_candidates,
+    intersection (p0, direction, lon, lat, depth) and a table with n_events, rms_km, dip_deg
+    and dip_direction_deg of each plane.
+    """
+    if catc is None:
+        catc = CatalogCols()
+    df = catalog.copy()
+    t = pd.to_datetime(df[catc.time], utc=True, errors="coerce", format="mixed")
+    keep = t.notna()
+    if start is not None:
+        keep &= t >= pd.to_datetime(start, utc=True)
+    if end is not None:
+        keep &= t <= pd.to_datetime(end, utc=True)
+    df = df[keep]
+    points = df[[catc.lon, catc.lat, catc.depth_km]].to_numpy(float)
+
+    seed1 = points[points_in_seed_volume(points, seed_vertices_1)]
+    seed2 = points[points_in_seed_volume(points, seed_vertices_2)]
+    roi_mask, lon_ref, lat_ref = build_loose_roi_mask(points, [np.asarray(seed_vertices_1), np.asarray(seed_vertices_2)],
+                                                      pad_xy_km=roi_pad_xy_km, pad_z_km=roi_pad_z_km)
+    candidates = points[roi_mask]
+    if verbose:
+        print(f"seed group 1: {len(seed1)} | seed group 2: {len(seed2)} | candidates in the box: {len(candidates)}")
+    if len(seed1) < 3 or len(seed2) < 3:
+        raise ValueError("Each seed volume needs at least 3 events; check the vertices against this catalog.")
+
+    labels_roi, fit1, fit2, group1, group2 = refine_two_planes(
+        candidates, seed1, seed2, lon_ref, lat_ref, max_perp_km=max_perp_km, uv_pad_frac=uv_pad_frac,
+        uv_pad_km=uv_pad_km, max_xy_km=max_xy_km, cost_xy_weight=cost_xy_weight, clip_nsig=clip_nsig,
+        clip_min_abs_km=clip_min_abs_km, max_iter=max_iter, verbose=verbose)
+
+    labels = np.zeros(len(df), dtype=int)
+    labels[np.flatnonzero(roi_mask)] = labels_roi
+
+    table = pd.DataFrame([
+        {"plane": k, "n_events": int((labels_roi == k).sum()), "rms_km": fit["rms"],
+         "dip_deg": plane_dip_deg(fit["normal"]), "dip_direction_deg": plane_dip_direction_deg(fit["normal"])}
+        for k, fit in ((1, fit1), (2, fit2))
+    ])
+    return {
+        "catalog": df,
+        "labels": labels,
+        "fit1": fit1,
+        "fit2": fit2,
+        "group1_xyz": group1,
+        "group2_xyz": group2,
+        "n_seed1": len(seed1),
+        "n_seed2": len(seed2),
+        "n_candidates": len(candidates),
+        "intersection": plane_intersection_line(fit1, fit2, scale_factor=2.5),
+        "table": table,
+    }
+
+
+def two_plane_polys(result, colors=(("red", "darkred"), ("blue", "navy")), alpha=0.40):
+    """plane_polys for plot_mapview3d_groups from a fit_two_planes_from_seeds result."""
+    polys = []
+    for fit, (face, edge) in zip((result["fit1"], result["fit2"]), colors):
+        lon, lat, z, *_ = plane_polygon_from_fit(fit)
+        polys.append({"xyz": list(zip(lon, lat, z)), "facecolor": face, "edgecolor": edge, "alpha": alpha, "lw": 0.1})
+    return polys
+
+
+# ============================================================
 # ANIMATION
 # ============================================================
 
@@ -8527,4 +9289,21 @@ __all__ = [
     "plot_aniakchak_alaska_location",
     "draw_3d_box_edges",
     "style_3d_axes",
+    "plot_eruption_history",
+    "catalog_stage_counts",
+    "catalog_summary_table",
+    "plot_depth_magnitude_distributions",
+    "plot_depth_distance_through_time",
+    "plot_interevent_times",
+    "weekly_screening_table",
+    "plot_fi_class_statistics",
+    "fit_plane_tls",
+    "points_in_seed_volume",
+    "build_loose_roi_mask",
+    "sigma_clip_plane",
+    "refine_two_planes",
+    "plane_intersection_line",
+    "plane_polygon_from_fit",
+    "fit_two_planes_from_seeds",
+    "two_plane_polys",
 ]
