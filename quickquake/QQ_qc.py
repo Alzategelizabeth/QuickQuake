@@ -37,6 +37,7 @@ Station normalization (--station_normalization):
 
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
+from collections import OrderedDict
 import re
 from datetime import datetime
 from bisect import bisect_right
@@ -84,6 +85,9 @@ ONE_COUNT_NOISE = 1.0 / 12.0  # counts^2: variance of the rounding noise of a di
                           # +-0.5 count). A quiet level below it means the channel records less than one
                           # digital count of noise, i.e. no live signal (dead or flat channel) (internal)
 
+NEIGHBOR_MARGIN_S = 60.0  # read a neighbor chunk only if the window is this close to its boundary (internal)
+FILE_CACHE_SIZE = 3       # waveform files kept in memory between events (internal)
+
 CHUNK_RE = re.compile(r"^\d{8}T\d{6}$")
 
 
@@ -119,8 +123,12 @@ def chunk_dirs_for_window(
     i1 = chunk_idx_for_time(t_end, times)
     a, b = i0, i1
     if pad_neighbors:
-        a = max(0, a - 1)
-        b = min(len(dirs) - 1, b + 1)
+        # Neighbor chunks only for windows near a chunk boundary: reading them for every
+        # event tripled the data read (one day file is ~200 MB) without changing any window.
+        if (t_start - times[i0]) < NEIGHBOR_MARGIN_S:
+            a = max(0, a - 1)
+        if i1 + 1 < len(times) and (times[i1 + 1] - t_end) < NEIGHBOR_MARGIN_S:
+            b = min(len(dirs) - 1, b + 1)
     return dirs[a:b + 1]
 
 
@@ -152,6 +160,22 @@ class StreamCache:
     def __init__(self):
         self._key = None
         self._st = None
+        # Last files read, as read from disk: when the next window needs another set of files
+        # (e.g. day d, then days d and d+1 near midnight), the ones already read are reused.
+        self._files: "OrderedDict[Path, Optional[obspy.Stream]]" = OrderedDict()
+
+    def _read_file(self, fp: Path) -> Optional[obspy.Stream]:
+        if fp in self._files:
+            self._files.move_to_end(fp)
+            return self._files[fp]
+        try:
+            s = read(str(fp))
+        except Exception:
+            s = None
+        self._files[fp] = s
+        while len(self._files) > FILE_CACHE_SIZE:
+            self._files.popitem(last=False)
+        return s
 
     def get_stream(
         self,
@@ -171,11 +195,11 @@ class StreamCache:
 
         st = None
         for fp in files:
-            try:
-                s = read(str(fp))
-                st = s if st is None else (st + s)
-            except Exception:
-                pass
+            s = self._read_file(fp)
+            if s is None:
+                continue
+            s = s.copy()   # the merge below works in place; the cached file stays as read
+            st = s if st is None else (st + s)
 
         if st is None:
             self._key = None
@@ -519,7 +543,7 @@ def qc_one_event(
         if not tr_list:
             continue
 
-        tr = tr_list[0].copy()
+        tr = tr_list[0].slice(t_start, t_end).copy()   # copy the window only, not the whole day
         tr.trim(t_start, t_end, pad=True, fill_value=0)
         tr.detrend("demean")
         if by_noise:
@@ -829,7 +853,10 @@ def main():
     rows = []
     n_total = len(catalog) if int(args.max_events) <= 0 else min(len(catalog), int(args.max_events))
 
-    for i in range(n_total):
+    # Events in time order, so the waveform files of a day are read once for all its events
+    # (the HypoDD catalog is not in time order). The outputs keep the catalog's order.
+    time_order = catalog.iloc[:n_total]["time"].argsort(kind="stable").to_numpy()
+    for k, i in enumerate(time_order):
         row_event = catalog.iloc[i]
         do_plot = bool(args.make_plot) and (plots_left > 0)
 
@@ -869,8 +896,8 @@ def main():
         if do_plot and r.get("qc_status") == "computed":
             plots_left -= 1
 
-        if (i + 1) % 500 == 0 or (i + 1) == n_total:
-            print(f"[QC] processed {i + 1}/{n_total} events")
+        if (k + 1) % 500 == 0 or (k + 1) == n_total:
+            print(f"[QC] processed {k + 1}/{n_total} events")
 
     qc_df = pd.DataFrame(rows)
 
