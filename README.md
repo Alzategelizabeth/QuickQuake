@@ -94,7 +94,6 @@ The settings you will change most often:
 | `location_ref_ele` | Reference elevation of the velocity models (highest station or topography, km). HypoInverse and HypoDD measure depth from it, so events in the volcanic edifice are kept; the final catalogs give depth below sea level |
 | `qc_max_plots` | Number of QC figures (default 20; `None` = one for every event) |
 | `qc_station_normalization` | `"none"` (default): the QC curve averages raw window energies in counts², so the station with the most counts controls it. `"noise"`: each station is first divided by its own quiet noise level (`qc_noise_window_s` seconds before origin, percentile `qc_noise_quantile`), so every station counts in "times above its own noise" |
-| `qc_station_combine` | How the stations are combined at each test velocity: `"mean"` (default, arithmetic) or `"geomean"` (geometric mean: one station far above the others, e.g. a glitch, weighs less) |
 
 Use one project folder per region and period: the merge step combines **every** chunk folder inside `data/`.
 
