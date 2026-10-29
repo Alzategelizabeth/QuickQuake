@@ -7546,11 +7546,18 @@ def plot_regional_location_map(
 
     ax.set_extent(region_extent, crs=ccrs.PlateCarree())
 
-    coast_regional = cfeature.GSHHSFeature(
-        scale=coast_scale,
-        edgecolor="grey",
-        facecolor=land_facecolor,
-    )
+    # GSHHS land at coast_scale if cartopy can get it; NOAA moved the GSHHS files and cartopy
+    # 0.25 still downloads from the old address (HTTP 404), so without a local copy the map
+    # uses the Natural Earth 50 m land polygons instead
+    from urllib.error import URLError
+    import cartopy.io.shapereader as shpreader
+    try:
+        shpreader.gshhs(scale=coast_scale, level=1)
+        coast_regional = cfeature.GSHHSFeature(scale=coast_scale, edgecolor="grey", facecolor=land_facecolor)
+    except (URLError, OSError) as err:
+        print(f"GSHHS coastline not available ({err}); using Natural Earth 50m land")
+        coast_regional = cfeature.NaturalEarthFeature("physical", "land", "50m", edgecolor="grey",
+                                                      facecolor=land_facecolor)
 
     ax.add_feature(cfeature.OCEAN, color=ocean_color, zorder=0)
     ax.add_feature(coast_regional, zorder=1)
