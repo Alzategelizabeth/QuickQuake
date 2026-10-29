@@ -80,8 +80,9 @@ TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" 
 GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
                           # gaps are filled when the chunk is merged and have ~0 energy after filtering
 ONE_COUNT_NOISE = 1.0 / 12.0  # counts^2: variance of the rounding noise of a digitizer (uniform error of
-                          # +-0.5 count). A noise level below it means the channel records less than one
-                          # digital count of noise, i.e. no live signal (dead or flat channel) (internal)
+                          # +-0.5 count), the smallest noise a channel can resolve. A lower measured noise
+                          # means the ground noise is below one digital count (the trace is almost flat),
+                          # not that the site is that quiet, so the noise level is never taken below it (internal)
 
 NEIGHBOR_MARGIN_S = 60.0  # read a neighbor chunk only if the window is this close to its boundary (internal)
 FILE_CACHE_SIZE = 3       # waveform files kept in memory between events (internal)
@@ -326,7 +327,7 @@ def noise_level_before_origin(
     earlier earthquakes as long as they fill less than half of that time (swarms).
     Data gaps (filled when the chunk is merged, ~0 after filtering) are left out: the
     window is cut in blocks of `win_len_s`, and blocks 1000x below the typical one are dropped.
-    Returns (level, "ok") or (nan, reason).
+    Returns (level, "ok"), (one count, "floored") or (nan, reason).
     """
     sr = float(tr.stats.sampling_rate)
     i0 = max(int((t0 - float(window_s) - tr.stats.starttime) * sr), 0)
@@ -349,10 +350,11 @@ def noise_level_before_origin(
         return float("nan"), "noise_mostly_gaps"
 
     level = float(np.median(blocks[not_gap]))
-    # Dead channel: less noise than one digital count. Its ratio to any glitch would be huge.
+    # Floor of one digital count: a channel whose ground noise is below one count reads an almost
+    # flat trace, and dividing by that near-zero noise would make any signal look huge.
     one_count = ONE_COUNT_NOISE if energy_type == "squared_median" else float(np.sqrt(ONE_COUNT_NOISE))
     if level < one_count:
-        return float("nan"), "noise_below_one_count"
+        return one_count, "floored"
 
     return level, "ok"
 
@@ -534,6 +536,7 @@ def qc_one_event(
 
     prepped: Dict[str, Tuple[obspy.Trace, float, float]] = {}
     dropped: Dict[str, str] = {}   # station -> why it was left out ("noise" mode)
+    floored: List[str] = []        # stations whose noise was raised to one digital count ("noise" mode)
     for sid, dkm in dist_map.items():
         parts = sid.split(".")
         if len(parts) < 2:
@@ -568,7 +571,9 @@ def qc_one_event(
             noise_level, why = noise_level_before_origin(
                 tr, t0, noise_window_s, winlen, energy_type=energy_type,
             )
-            if why != "ok":
+            if why == "floored":
+                floored.append(f"{net}.{sta}")
+            elif why != "ok":
                 dropped[f"{net}.{sta}"] = why
                 continue
 
@@ -734,6 +739,7 @@ def qc_one_event(
         # which stations entered the curve, and which were left out and why (for checking)
         result["qc_n_stations"] = len(prepped)
         result["qc_stations_dropped"] = ";".join(f"{k}:{v}" for k, v in sorted(dropped.items()))
+        result["qc_stations_floored"] = ";".join(sorted(floored))
     return result
 
 
@@ -901,7 +907,7 @@ def main():
         qc_merge["pc_ratio_energy"] = pd.to_numeric(qc_merge["pc_ratio_energy"], errors="coerce").round(2)
 
         qc_cols = ["event_id", "pc_ratio_energy", "qc_status", "qc_reason"]
-        qc_cols += [c for c in ("qc_n_stations", "qc_stations_dropped") if c in qc_merge.columns]
+        qc_cols += [c for c in ("qc_n_stations", "qc_stations_dropped", "qc_stations_floored") if c in qc_merge.columns]
         raw_out = raw_out.merge(
             qc_merge[qc_cols],
             left_on="_event_id_num",
@@ -979,6 +985,13 @@ def main():
         if len(reasons) > 0:
             print("\nStations left out of an event's curve ('noise' mode), by reason:")
             print(reasons.value_counts().to_string())
+
+    if "qc_stations_floored" in raw_out.columns:
+        floored = raw_out["qc_stations_floored"].dropna().astype(str).str.split(";").explode()
+        floored = floored[floored.str.len() > 0]
+        if len(floored) > 0:
+            print("\nStations whose noise was raised to one digital count ('noise' mode):")
+            print(floored.value_counts().to_string())
 
 
 if __name__ == "__main__":
