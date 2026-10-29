@@ -565,6 +565,25 @@ def _shaded_relief_tile_class():
     return ShadedReliefESRI
 
 
+def _depth_colorbar(fig, ax, mappable, *, depth_down=True, label="Depth (km)", label_size=20, tick_size=16):
+    """
+    Depth colour bar of the map views. depth_down=True puts 0 km at the top and the deepest
+    value at the bottom, as depth is read in a cross section. Ticks are integers chosen by
+    matplotlib; before, they were 9 evenly spaced values written as int (0, 1.625, 3.25 ... km
+    labelled 0, 1, 3 ...), so most labels did not match their position.
+    """
+    import matplotlib.ticker as mticker
+
+    cbar = fig.colorbar(mappable, ax=ax, fraction=0.03, pad=0.015, aspect=40)
+    cbar.set_label(label, fontsize=label_size)
+    cbar.locator = mticker.MaxNLocator(nbins=8, integer=True)
+    cbar.update_ticks()
+    cbar.ax.tick_params(labelsize=tick_size)
+    if depth_down:
+        cbar.ax.invert_yaxis()
+    return cbar
+
+
 def plot_mapview_seismicity(
     catalog,
     stations,
@@ -593,9 +612,18 @@ def plot_mapview_seismicity(
     out_png=None,
     dpi=600,
     region_name=None,
+    depth_down=True,
+    station_legend=False,
     catc: Optional[CatalogCols] = None,
     stc: Optional[StationCols] = None,
 ):
+    """
+    Seismicity map: events coloured by depth (depth_vmin..depth_vmax km; deeper or shallower
+    events get the end colours) and sized by magnitude, with the stations inside the extent
+    (events + pad_lon / pad_lat). depth_down=True: 0 km at the top of the colour bar.
+    station_legend=False: the legend shows only the earthquakes (the station networks are in
+    the station map).
+    """
     import matplotlib.pyplot as plt
     import matplotlib as mpl
     import matplotlib.ticker as mticker
@@ -693,14 +721,14 @@ def plot_mapview_seismicity(
     gl.xformatter = cticker.LongitudeFormatter()
     gl.yformatter = cticker.LatitudeFormatter()
 
-    cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.015, aspect=40)
-    cbar.set_label("Depth (km)", fontsize=20)
-    ticks = np.linspace(float(depth_vmin), float(depth_vmax), 9)
-    cbar.set_ticks(ticks)
-    cbar.set_ticklabels([f"{int(t)}" for t in ticks])
-    cbar.ax.tick_params(labelsize=16)
+    _depth_colorbar(fig, ax, sc, depth_down=depth_down)
 
+    handles, labels = ax.get_legend_handles_labels()
+    if not station_legend:
+        keep = [k for k, lab in enumerate(labels) if lab in ("Earthquakes", "Reference ellipse")]
+        handles, labels = [handles[k] for k in keep], [labels[k] for k in keep]
     ax.legend(
+        handles, labels,
         loc="upper left",
         fontsize=18,
         frameon=True,
@@ -872,6 +900,7 @@ def plot_mapview_seismicity_zoom(
     show=False,
     depth_filter_min=None,
     depth_filter_max=None,
+    depth_down=True,
     catc: Optional[CatalogCols] = None,
 ):
     import numpy as np
@@ -1012,12 +1041,7 @@ def plot_mapview_seismicity_zoom(
     gl.xformatter = cticker.LongitudeFormatter()
     gl.yformatter = cticker.LatitudeFormatter()
 
-    cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.015, aspect=40)
-    cbar.set_label("Depth (km)", fontsize=20)
-    ticks = np.linspace(float(depth_vmin), float(depth_vmax), 9)
-    cbar.set_ticks(ticks)
-    cbar.set_ticklabels([f"{int(t)}" for t in ticks])
-    cbar.ax.tick_params(labelsize=16)
+    _depth_colorbar(fig, ax, sc, depth_down=depth_down)
 
     ax.legend(
         loc="upper left",

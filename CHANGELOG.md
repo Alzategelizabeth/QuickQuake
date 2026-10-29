@@ -4,6 +4,9 @@ Versions stay 0.x until the first official release (1.0).
 
 ## Unreleased
 
+- `qq_helpers.plot_mapview_seismicity` and `plot_mapview_seismicity_zoom`: the depth colour bar has 0 km at the top and the deepest value at the bottom (`depth_down=True`, new). Its ticks are now integers chosen by matplotlib; before, they were 9 evenly spaced values written as `int`, so with a 0–13 km bar the ticks at 1.625, 3.25 … km were labelled 1, 3 … The two functions share the new `_depth_colorbar`. In `plot_mapview_seismicity` the legend shows only the earthquakes (`station_legend=False`, new); the networks are in the station map.
+- `visualization.ipynb`: the zoom window is set in the zoom cell (`ZOOM_LON`, `ZOOM_LAT` in degrees, passed as `xlim` / `ylim`; `None` keeps `zoom_factor=3`), and the cell prints how many events fall inside it.
+
 - `qq_helpers.plot_mapview_basemap_stations`: the map now covers every station as well as every event. Before, its extent came from the events only, so with a catalog cut to `RADIUS_KM` the farther stations were outside the map: on Aniakchak 2021–2024 (run C, 20 km) it showed 14 of the 40 stations, all of them AV. `visualization.ipynb` draws it with `relief_zoom=9` (a region of about 200 km needs fewer shaded-relief tiles than the 20 km seismicity maps) and calls section 2 "Region and stations".
 - Fixed network colours for AK, AT, AM and 6J. AT was not in `NETWORK_COLOURS` and its fallback colour (`#3182bd`) was almost the same blue as AV (`#1f77b4`).
 - Station legends count each station once and say "1 station" instead of "1 stations". A station is listed once per instrument (`AV.ANPK..BH` and `AV.ANPK..EH`), so on Aniakchak run C the legend said "AV (33 stations)" for 25 AV stations.
