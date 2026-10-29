@@ -2042,23 +2042,26 @@ def plot_catalog_3d_topo_seismicity(
     return fig
 
 
-def plot_mapview3d_months(
+def plot_mapview3d(
     catalog: pd.DataFrame,
     *,
     start,
     end,
+    color_by: str = "time",
     depth_max: float = 40.0,
     dem_res: str = "15s",
     exagg: float = 4.0,
     topo_cmap: str = "gist_earth_r",
     quake_cmap: str = "magma",
     size_k: float = 15.0,
+    marker_min: Optional[float] = 6.0,
     topo_alpha: float = 0.95,
     topo_stride: int = 5,
     view_elev: float = 4.0,
     view_azim: float = 34.0,
-    camera_dist: Optional[float] = None,   # <-- nuevo
+    camera_dist: Optional[float] = None,
     n_xticks: int = 5,
+    n_yticks: Optional[int] = 5,
     tick_fontsize: int = 13,
     cbar_tick_fontsize: int = 18,
     figsize: Tuple[float, float] = (12, 9),
@@ -2068,207 +2071,29 @@ def plot_mapview3d_months(
     catc: Optional[CatalogCols] = None,
 ):
     """
-    3D figure:
-      - PyGMT topography (earth_relief) -> 3D surface
-      - Seismicity: x=lon, y=lat, z=depth (inverted)
-      - Color: month (1-12)
-      - Size: size_k * mag
-      - Filters: [start, end) and depth <= depth_max
+    3-D view of the seismicity under the topography (replaces plot_mapview3d_timecolor and
+    plot_mapview3d_months, which differed only in the colour).
 
-    Parameter:
-      camera_dist : float | None
-          Camera distance in Matplotlib 3D.
-          Smaller value = more visual zoom.
-          Examples:
-              6  -> moderate zoom
-              3  -> strong zoom
+      - Topography: SRTM15+ earth relief (load_earth_relief) as a surface, exaggerated by exagg
+      - Events: x = lon, y = lat, z = depth (km, positive down); only [start, end) and depth <= depth_max
+      - Colour: color_by = "time" (origin date) or "month" (calendar month 1-12, whatever the year,
+        to look for seasonality)
+      - Size: marker area size_k * magnitude (pt^2), at least marker_min. marker_min=None keeps the
+        raw size_k * magnitude of the old functions, where events with magnitude <= 0 got a size <= 0
+        and were not drawn (692 of 7837 events on Aniakchak run C)
+      - camera_dist: matplotlib 3-D camera distance (smaller = closer); None = matplotlib's default
+      - n_yticks=None lets matplotlib place the latitude ticks
 
-    Note:
-      - This does NOT change the data or the region.
-      - It only changes the viewing perspective.
-      - Depends on Matplotlib and may not behave perfectly.
+    Returns fig, ax, meta.
     """
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
-
-    if catc is None:
-        catc = CatalogCols()
-
-    df = normalize_catalog(catalog, catc=catc)
-    df = df.dropna(subset=[catc.time, catc.lat, catc.lon]).copy()
-
-    t = pd.to_datetime(df[catc.time], utc=True, errors="coerce")
-    df = df[pd.notna(t)].copy()
-    df["_t"] = t
-
-    start_dt = pd.to_datetime(start, utc=True)
-    end_dt = pd.to_datetime(end, utc=True)
-
-    df = df[(df["_t"] >= start_dt) & (df["_t"] < end_dt)].copy()
-
-    depth_col = catc.depth_km if catc.depth_km in df.columns else None
-    if depth_col is None:
-        df["depth_km"] = 0.0
-        depth_col = "depth_km"
-    else:
-        df[depth_col] = pd.to_numeric(df[depth_col], errors="coerce").fillna(0.0)
-
-    df = df[df[depth_col] <= float(depth_max)].copy()
-
-    mag_col = catc.mag if catc.mag in df.columns else None
-    if mag_col is None:
-        df["magnitude"] = 1.0
-        mag_col = "magnitude"
-    else:
-        df[mag_col] = pd.to_numeric(df[mag_col], errors="coerce").fillna(1.0)
-
-    df["month"] = df["_t"].dt.month.astype(int)
-
-    print(f"Number of events after filters (time, depth<={depth_max} km): {len(df)}")
-
-    if df.empty:
-        raise ValueError("No events left after filtering (check start/end/depth_max).")
-
-    minlon = float(df[catc.lon].min())
-    maxlon = float(df[catc.lon].max())
-    minlat = float(df[catc.lat].min())
-    maxlat = float(df[catc.lat].max())
-    region = [minlon, maxlon, minlat, maxlat]
-
-    lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
-    elev_km = elev_m / 1000.0
-
-    Lon, Lat = np.meshgrid(lon, lat)
-    Z = -elev_km * float(exagg)
-
-    fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot(111, projection="3d")
-    fig.subplots_adjust(left=0.10, right=0.90)
-
-    ax.plot_surface(
-        Lon, Lat, Z,
-        cmap=topo_cmap,
-        rstride=int(topo_stride),
-        cstride=int(topo_stride),
-        linewidth=0,
-        antialiased=True,
-        alpha=float(topo_alpha),
-    )
-
-    sc = ax.scatter(
-        df[catc.lon].astype(float),
-        df[catc.lat].astype(float),
-        df[depth_col].astype(float),
-        c=df["month"].to_numpy(),
-        cmap=quake_cmap,
-        norm=Normalize(vmin=1, vmax=12),
-        s=float(size_k) * df[mag_col].to_numpy(),   # marker area (pt^2) = size_k * magnitude, as before v4.7
-        edgecolor="k",
-        linewidth=0.2,
-        alpha=1.0,
-        label="Earthquakes",
-    )
-
-    ax.tick_params(axis="x", labelsize=int(tick_fontsize), labelrotation=0)
-    ax.tick_params(axis="y", labelsize=int(tick_fontsize) + 1, labelrotation=0)
-    ax.tick_params(axis="z", labelsize=int(tick_fontsize) + 1, labelrotation=0)
-
-    xticks = np.linspace(minlon, maxlon, int(n_xticks))
-    ax.set_xticks(xticks)
-    ax.set_xticklabels([f"{x:.1f}" for x in xticks])
-
-    ax.set_zlim(float(np.nanmin(Z)), float(depth_max))
-    ax.invert_zaxis()
-
-    cbar = fig.colorbar(
-        sc,
-        ax=ax,
-        pad=1e-14,
-        fraction=0.02,
-        shrink=0.4,
-        aspect=30,
-    )
-    cbar.ax.tick_params(labelsize=int(cbar_tick_fontsize))
-    months = np.arange(1, 13)
-    cbar.set_ticks(months)
-    cbar.set_ticklabels([
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    ])
-
-    ax.view_init(elev=float(view_elev), azim=float(view_azim))
-
-    # Visual zoom through camera distance
-    if camera_dist is not None:
-        try:
-            ax.dist = float(camera_dist)
-        except Exception as e:
-            print(f"[warn] No se pudo aplicar camera_dist={camera_dist}: {e}")
-
-    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-        axis._axinfo["grid"]["color"] = (0.5, 0.5, 0.5, 0.99)
-        axis._axinfo["grid"]["linewidth"] = 0.20
-        axis._axinfo["grid"]["linestyle"] = "--"
-
-    if savefig:
-        if out_png is None:
-            out_png = "mapview3d_months.png"
-        fig.savefig(out_png, dpi=int(dpi), bbox_inches="tight")
-        print(f"[ok] saved: {out_png}")
-
-    meta: Dict[str, Any] = {
-        "n_events": int(len(df)),
-        "region": region,
-        "bounds": (minlon, maxlon, minlat, maxlat),
-        "dem_res": dem_res,
-        "depth_max": float(depth_max),
-        "camera_dist": camera_dist,
-    }
-
-    return fig, ax, meta
-
-
-def plot_mapview3d_timecolor(
-    catalog: pd.DataFrame,
-    *,
-    start,
-    end,
-    depth_max: float = 40.0,
-    dem_res: str = "15s",
-    exagg: float = 4.0,
-    topo_cmap: str = "gist_earth_r",
-    quake_cmap: str = "magma",
-    size_k: float = 15.0,
-    topo_alpha: float = 0.95,
-    topo_stride: int = 5,
-    view_elev: float = 4.0,
-    view_azim: float = 34.0,
-    n_xticks: int = 5,
-    n_yticks: int = 5,
-    tick_fontsize: int = 13,
-    cbar_tick_fontsize: int = 18,
-    figsize: Tuple[float, float] = (12, 9),
-    savefig: bool = False,
-    out_png: Optional[str] = None,
-    dpi: int = 800,
-    catc: Optional["CatalogCols"] = None,
-):
-    """
-    3D figure:
-      - PyGMT topography (earth_relief) -> 3D surface
-      - Seismicity: x=lon, y=lat, z=depth (inverted)
-      - Color: continuous time
-      - Size: size_k * mag
-      - Filters: [start, end) and depth <= depth_max
-    """
-
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    from matplotlib.colors import Normalize
 
+    if color_by not in ("time", "month"):
+        raise ValueError(f"color_by must be 'time' or 'month', not {color_by!r}.")
     if catc is None:
         catc = CatalogCols()
 
@@ -2281,7 +2106,6 @@ def plot_mapview3d_timecolor(
 
     start_dt = pd.to_datetime(start, utc=True)
     end_dt = pd.to_datetime(end, utc=True)
-
     df = df[(df["_t"] >= start_dt) & (df["_t"] < end_dt)].copy()
 
     depth_col = catc.depth_km if catc.depth_km in df.columns else None
@@ -2290,7 +2114,6 @@ def plot_mapview3d_timecolor(
         depth_col = "depth_km"
     else:
         df[depth_col] = pd.to_numeric(df[depth_col], errors="coerce").fillna(0.0)
-
     df = df[df[depth_col] <= float(depth_max)].copy()
 
     mag_col = catc.mag if catc.mag in df.columns else None
@@ -2301,12 +2124,19 @@ def plot_mapview3d_timecolor(
         df[mag_col] = pd.to_numeric(df[mag_col], errors="coerce").fillna(1.0)
 
     print(f"Number of events after filters (time, depth<={depth_max} km): {len(df)}")
-
     if df.empty:
         raise ValueError("No events left after filtering (check start/end/depth_max).")
 
-    # Continuous time for coloring
-    df["_t_num"] = mdates.date2num(df["_t"].dt.to_pydatetime())
+    if color_by == "time":
+        colour = mdates.date2num(df["_t"].dt.to_pydatetime())
+        norm = None
+    else:
+        colour = df["_t"].dt.month.astype(int).to_numpy()
+        norm = Normalize(vmin=1, vmax=12)
+
+    sizes = float(size_k) * df[mag_col].to_numpy()   # marker area (pt^2) = size_k * magnitude
+    if marker_min is not None:
+        sizes = np.clip(np.where(np.isfinite(sizes), sizes, float(marker_min)), float(marker_min), None)
 
     minlon = float(df[catc.lon].min())
     maxlon = float(df[catc.lon].max())
@@ -2316,7 +2146,6 @@ def plot_mapview3d_timecolor(
 
     lon, lat, elev_m = load_earth_relief(dem_res, region=region)   # same grid as pygmt, without GMT
     elev_km = elev_m / 1000.0
-
     Lon, Lat = np.meshgrid(lon, lat)
     Z = -elev_km * float(exagg)
 
@@ -2338,9 +2167,10 @@ def plot_mapview3d_timecolor(
         df[catc.lon].astype(float),
         df[catc.lat].astype(float),
         df[depth_col].astype(float),
-        c=df["_t_num"].to_numpy(),
+        c=colour,
         cmap=quake_cmap,
-        s=float(size_k) * df[mag_col].to_numpy(),   # marker area (pt^2) = size_k * magnitude, as before v4.7
+        norm=norm,
+        s=sizes,
         edgecolor="k",
         linewidth=0.2,
         alpha=1.0,
@@ -2354,31 +2184,31 @@ def plot_mapview3d_timecolor(
     xticks = np.linspace(minlon, maxlon, int(n_xticks))
     ax.set_xticks(xticks)
     ax.set_xticklabels([f"{x:.1f}" for x in xticks])
-
-    yticks = np.linspace(minlat, maxlat, int(n_yticks))
-    ax.set_yticks(yticks)
-    ax.set_yticklabels([f"{y:.1f}" for y in yticks])
+    if n_yticks is not None:
+        yticks = np.linspace(minlat, maxlat, int(n_yticks))
+        ax.set_yticks(yticks)
+        ax.set_yticklabels([f"{y:.1f}" for y in yticks])
 
     ax.set_zlim(float(np.nanmin(Z)), float(depth_max))
     ax.invert_zaxis()
 
-    cbar = fig.colorbar(
-        sc,
-        ax=ax,
-        pad=1e-14,
-        fraction=0.02,
-        shrink=0.4,
-        aspect=30,
-    )
+    cbar = fig.colorbar(sc, ax=ax, pad=1e-14, fraction=0.02, shrink=0.4, aspect=30)
     cbar.ax.tick_params(labelsize=int(cbar_tick_fontsize))
-    cbar.set_label("Time", fontsize=int(cbar_tick_fontsize))
-
-    locator = mdates.AutoDateLocator()
-    formatter = mdates.ConciseDateFormatter(locator)
-    cbar.ax.yaxis.set_major_locator(locator)
-    cbar.ax.yaxis.set_major_formatter(formatter)
+    if color_by == "time":
+        cbar.set_label("Time", fontsize=int(cbar_tick_fontsize))
+        locator = mdates.AutoDateLocator()
+        cbar.ax.yaxis.set_major_locator(locator)
+        cbar.ax.yaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    else:
+        cbar.set_ticks(np.arange(1, 13))
+        cbar.set_ticklabels(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
 
     ax.view_init(elev=float(view_elev), azim=float(view_azim))
+    if camera_dist is not None:
+        try:
+            ax.dist = float(camera_dist)
+        except Exception as e:
+            print(f"[warn] camera_dist={camera_dist} could not be applied: {e}")
 
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis._axinfo["grid"]["color"] = (0.5, 0.5, 0.5, 0.99)
@@ -2387,20 +2217,22 @@ def plot_mapview3d_timecolor(
 
     if savefig:
         if out_png is None:
-            out_png = "mapview3d_timecolor.png"
+            out_png = f"mapview3d_{color_by}.png"
         fig.savefig(out_png, dpi=int(dpi), bbox_inches="tight")
         print(f"[ok] saved: {out_png}")
 
     meta: Dict[str, Any] = {
         "n_events": int(len(df)),
+        "n_magnitude_le_0": int((df[mag_col] <= 0).sum()),
         "region": region,
         "bounds": (minlon, maxlon, minlat, maxlat),
         "dem_res": dem_res,
         "depth_max": float(depth_max),
+        "color_by": color_by,
         "time_min": str(df["_t"].min()),
         "time_max": str(df["_t"].max()),
+        "camera_dist": camera_dist,
     }
-
     return fig, ax, meta
 
 
@@ -9282,8 +9114,7 @@ __all__ = [
     "plot_timeline_legend_only",
     "plot_event_count_time",
     "plot_event_count_time_v2",
-    "plot_mapview3d_months",
-    "plot_mapview3d_timecolor",
+    "plot_mapview3d",
     "plot_mapview3d_groups",
     "project_profile_distances",
     "add_profile_line",
