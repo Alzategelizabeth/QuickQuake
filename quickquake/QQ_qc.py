@@ -233,8 +233,13 @@ def stations_by_hypo_distance_km(
     return dict(zip(tmp["id"], tmp["hypo_km"]))
 
 
-def best_Z_channel_for_station(st: obspy.Stream, net_sta: str) -> Optional[str]:
+def best_Z_channel_for_station(st: obspy.Stream, net_sta: str, include_accelerometers: bool = False) -> Optional[str]:
     prefs = ["BHZ", "EHZ", "SHZ", "HHZ"]
+    if include_accelerometers:
+        # Only when energies are divided by each station's noise: counts of acceleration and
+        # counts of velocity cannot be averaged, but "times above its own noise" can.
+        # Velocity sensors are still preferred when a station has both.
+        prefs += ["HNZ", "ENZ"]
     chans = {tr.stats.channel for tr in st if f"{tr.stats.network}.{tr.stats.station}" == net_sta}
     for c in prefs:
         if c in chans:
@@ -504,7 +509,7 @@ def qc_one_event(
             continue
         net, sta = parts[0], parts[1]
 
-        chz = best_Z_channel_for_station(st_raw, f"{net}.{sta}")
+        chz = best_Z_channel_for_station(st_raw, f"{net}.{sta}", include_accelerometers=by_noise)
         if chz is None:
             continue
 
