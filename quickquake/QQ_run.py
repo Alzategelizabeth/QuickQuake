@@ -111,7 +111,7 @@ DEFAULTS = {
     "qc_winlen": 3,
     "qc_noise_percentile": 50.0,
     "qc_signal_percentile": 90.0,
-    "qc_min_ratio": 5.0,
+    "qc_min_ratio": 3.0,
     "qc_energy_type": "squared_median",
     "qc_make_plot": True,
     "qc_max_plots": 20,
@@ -124,7 +124,7 @@ DEFAULTS = {
     "qc_pad_neighbors": True,
     "qc_geom_correction": False,
     "qc_max_events": 0,
-    "qc_station_normalization": "none",
+    "qc_station_normalization": "noise",
     "qc_noise_window_s": 300.0,
 }
 COMPUTED = ["BASE_DIR", "DATA_ROOT", "MODEL_DIR", "location_templates_dir"]

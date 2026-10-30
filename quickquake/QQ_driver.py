@@ -147,7 +147,7 @@ qc_vsteps_curve = 150
 qc_winlen = 3
 qc_noise_percentile  = 50.0
 qc_signal_percentile = 90.0
-qc_min_ratio = 5.0 
+qc_min_ratio = 3.0  # with qc_station_normalization = "noise"; chosen on 150 labelled Aniakchak events (2026-10-30)
 qc_energy_type = "squared_median" # other option is "envelope_median" or "squared_median"
 qc_make_plot = True
 qc_max_plots = 20 # number of QC figures; set to None to plot every event
@@ -160,7 +160,7 @@ qc_vmax_signal = 8.0  # highest velocity of the signal band (km/s)
 qc_pad_neighbors = True      # also read neighbor chunks when a window crosses a chunk boundary
 qc_geom_correction = False   # multiply energy by distance^2
 qc_max_events = 0            # test only the first N events (0 = all)
-qc_station_normalization = "none"  # "none": average raw energies (counts^2), the original QC: the station
+qc_station_normalization = "noise"  # "none": average raw energies (counts^2), the original QC: the station
                                    # with the most counts (nearest, highest gain or noisiest) controls it.
                                    # "noise": divide each station by its own noise level first
 qc_noise_window_s = 300.0    # "noise": noise level = median energy of these seconds before origin

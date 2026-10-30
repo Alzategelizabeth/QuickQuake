@@ -150,7 +150,7 @@ qc_vsteps_curve = 150
 qc_winlen = 3
 qc_noise_percentile  = 50.0
 qc_signal_percentile = 90.0
-qc_min_ratio = 5.0 
+qc_min_ratio = 3.0  # with qc_station_normalization = "noise"; chosen on 150 labelled Aniakchak events (2026-10-30)
 qc_energy_type = "squared_median" # other option is "envelope_median" or "squared_median"
 qc_make_plot = True
 qc_max_plots = 20 # number of QC figures; set to None to plot every event

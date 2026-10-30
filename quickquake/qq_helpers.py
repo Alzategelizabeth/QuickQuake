@@ -8223,8 +8223,13 @@ def plot_event_spectrograms_vertical_picks_only(
 
 
 # ============================================================
-# MOVEOUT FIGURE FOR PUBLICATION (larger text, custom ticks)
+# MOVEOUT FIGURE FOR PUBLICATION (record section, one row per station)
 # ============================================================
+
+# Strong, distinct colours for the station traces (no black or red: those are the P and S picks)
+MOVEOUT_TRACE_COLOURS = ["#1f4e9c", "#2e7d32", "#7b1fa2", "#00838f", "#a0522d",
+                         "#c2185b", "#5d6d0e", "#e07b00", "#3949ab", "#00695c"]
+
 
 def plot_event_moveout_pretty(
     row_event,
@@ -8237,204 +8242,129 @@ def plot_event_moveout_pretty(
     pre_s=5,
     post_s=40,
     min_prob=None,
-
     # bandpass filter (Hz)
     freqmin=1.0,
-    freqmax=5.0,
+    freqmax=15.0,
     corners=4,
     zerophase=True,
-
-    # figure size (inches)
-    figsize=(13, 7),
-
-    # vertical spacing and wiggle amplitude
-    wiggle_frac_of_spacing=1.5,
-    y_pad_km=2.0,
-    y_tick_step_km=None,
-
-    # picks
+    # figure: width in inches; height grows with the number of stations when figsize is None
+    figsize=None,
+    width_in=12.0,
+    row_height_in=0.9,
+    # look
+    trace_colours=None,
+    trace_lw=0.7,
     p_color="black",
-    s_color="red",
-    p_style="vline",
-    s_style="vline",
-    line_height_km=2.2,
-    line_width=1.8,
-    marker_size=5.0,
-
-    # text sizes
+    s_color="#d62728",
+    pick_lw=2.2,
     label_fontsize=20,
     tick_fontsize=17,
+    station_fontsize=15,
     title_fontsize=17,
-    legend_fontsize=15,
-
-    # x-axis ticks
-    x_tick_seconds=10,
-    x_tick_rotation=0,
-
-    # axis and tick line widths
-    tick_length=7,
-    tick_width=1.4,
-    spine_width=1.2,
-
-    # margins (fractions of the figure)
-    left=0.11,
-    right=0.98,
-    bottom=0.14,
-    top=0.90,
-
     # optional saving
     save_path=None,
     save_format=None,
     dpi=400,
 ):
     """
-    Wrapper around plot_event_moveout_picks_only with control of:
-      - figure size
-      - font sizes
-      - vertical spacing
-      - x/y tick spacing
-      - pick and axis line widths
-      - optional saving (format taken from the save_path extension)
+    Record section of one event: one row per station with a pick, nearest station at the top.
+
+    Each vertical trace is filtered, scaled to its own maximum and drawn in its own colour; P (black) and
+    S (red) picks are short vertical bars on the trace. The station name and its hypocentral distance are
+    written at the right end of each row, so the y axis needs no scale. X = seconds from origin time.
 
     Returns:
-      fig, ax, meta
+      fig, ax, meta   (meta: {"files": [...], "stations_used": [...]}); fig and ax are None when
+                      there is nothing to plot.
     """
+    import matplotlib.pyplot as plt
+    from obspy import UTCDateTime
 
-    import numpy as np
-    import matplotlib.dates as mdates
-    import matplotlib.ticker as mticker
-    from pathlib import Path
-
-    fig, ax, meta = plot_event_moveout_picks_only(
-        row_event=row_event,
-        picks=picks,
-        stations=stations,
-        cache=cache,
-        wf_index=wf_index,
-
-        pre_s=pre_s,
-        post_s=post_s,
-        min_prob=min_prob,
-
-        freqmin=freqmin,
-        freqmax=freqmax,
-        corners=corners,
-        zerophase=zerophase,
-
-        p_style=p_style,
-        s_style=s_style,
-        p_color=p_color,
-        s_color=s_color,
-        marker_size=marker_size,
-        line_width=line_width,
-        line_height_km=line_height_km,
-
-        wiggle_frac_of_spacing=wiggle_frac_of_spacing,
-        y_pad_km=y_pad_km,
-
-        figsize=figsize,
-        save_png=None,
-    )
-
-    if fig is None or ax is None:
-        return fig, ax, meta
-
-    # -------------------------
-    # Labels and title
-    # -------------------------
-    ax.set_xlabel("Time", fontsize=label_fontsize, labelpad=10)
-    ax.set_ylabel("Distance (km)", fontsize=label_fontsize, labelpad=10)
     catc = CatalogCols()
+    pkc = PicksCols()
+    colours = trace_colours or MOVEOUT_TRACE_COLOURS
 
-    event_time = pd.to_datetime(row_event[catc.time], utc=True, errors="coerce")
+    t0 = UTCDateTime(pd.to_datetime(row_event[catc.time], utc=True).to_pydatetime())
+    t_start, t_end = t0 - float(pre_s), t0 + float(post_s)
 
-    if pd.notna(event_time):
-        event_time_str = event_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-    else:
-        event_time_str = str(row_event[catc.time])
+    pw = picks_for_event(row_event=row_event, picks=picks, t_start=t_start, t_end=t_end,
+                         catc=catc, pkc=pkc, prefer_event_id=True, min_prob=min_prob)
+    if pw.empty:
+        print("[moveout] No picks for this event/window.")
+        return None, None, {"files": [], "stations_used": []}
 
-    eid = row_event.get(catc.event_id, "")
+    _, dist_map, _ = stations_by_hypo_distance_km(
+        stations=stations, ev_lat=float(row_event[catc.lat]), ev_lon=float(row_event[catc.lon]),
+        ev_depth_km=float(row_event.get(catc.depth_km, 0.0)), stc=StationCols())
+    sids = sorted((sid for sid in pw[pkc.station_id].dropna().unique() if sid in dist_map),
+                  key=lambda sid: dist_map[sid])
 
-    ax.set_title(
-        f"event_id={eid} | {event_time_str}",
-        fontsize=title_fontsize,
-        pad=12,
-    )
+    st, files = get_trimmed_stream(cache, t_start, t_end, wf_index, pad_neighbors=1)
+    files = [str(f) for f in files] if files else []
+    if st is None or len(st) == 0:
+        print("[moveout] No waveforms in window.")
+        return None, None, {"files": files, "stations_used": []}
 
-    # -------------------------
-    # Ticks
-    # -------------------------
-    ax.tick_params(
-        axis="both",
-        which="major",
-        labelsize=tick_fontsize,
-        length=tick_length,
-        width=tick_width,
-    )
+    # one filtered, normalized trace per station (stations without usable data are left out)
+    rows = []
+    for sid in sids:
+        tr, _ = _select_vertical_trace_for_sid(st, sid)
+        if tr is None:
+            continue
+        tr.detrend("demean")
+        tr.taper(max_percentage=0.05, type="cosine")
+        if freqmin is not None and freqmax is not None:
+            nyq = 0.5 * float(tr.stats.sampling_rate)
+            tr.filter("bandpass", freqmin=float(freqmin), freqmax=min(float(freqmax), 0.99 * nyq),
+                      corners=int(corners), zerophase=bool(zerophase))
+        tr.trim(t_start, t_end)
+        m = float(np.max(np.abs(tr.data))) if tr.stats.npts else 0.0
+        if not np.isfinite(m) or m == 0.0:
+            continue
+        rows.append((sid, tr.times() + (tr.stats.starttime - t0), tr.data / m))
+    if not rows:
+        print("[moveout] No usable traces for stations-with-picks (nothing plotted).")
+        return None, None, {"files": files, "stations_used": []}
 
-    ax.tick_params(axis="x", labelrotation=x_tick_rotation)
+    n = len(rows)
+    if figsize is None:
+        figsize = (float(width_in), float(row_height_in) * n + 1.4)
+    fig, ax = plt.subplots(figsize=figsize)
 
-    # x-axis tick spacing in seconds
-    if x_tick_seconds is not None:
-        ax.xaxis.set_major_locator(
-            mdates.SecondLocator(interval=int(x_tick_seconds))
-        )
-        ax.xaxis.set_major_formatter(
-            mdates.DateFormatter("%H:%M:%S")
-        )
+    pick_t = pd.to_datetime(pw[pkc.time], utc=True)
+    for k, (sid, x, y) in enumerate(rows):
+        yk = n - 1 - k  # nearest station on top
+        ax.plot(x, yk + 0.42 * y, color=colours[k % len(colours)], lw=trace_lw)
+        for t_pick, ph in zip(pick_t[pw[pkc.station_id] == sid], pw.loc[pw[pkc.station_id] == sid, pkc.phase]):
+            ph = str(ph).upper()
+            if ph in ("P", "S"):
+                t_rel = UTCDateTime(t_pick.to_pydatetime()) - t0
+                ax.plot([t_rel, t_rel], [yk - 0.45, yk + 0.45], lw=pick_lw,
+                        color=p_color if ph == "P" else s_color)
+        ax.text(1.01, yk, f"{sid.split('.')[1]}  {dist_map[sid]:.0f} km", transform=ax.get_yaxis_transform(),
+                fontsize=station_fontsize, va="center")
 
-    # y-axis tick spacing in km
-    if y_tick_step_km is not None:
-        ax.yaxis.set_major_locator(
-            mticker.MultipleLocator(float(y_tick_step_km))
-        )
+    ax.axvline(0, color="black", lw=0.8, ls=":")
+    ax.set_xlim(-float(pre_s), float(post_s))
+    ax.set_ylim(-0.7, n - 0.3)
+    ax.set_yticks([])
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.set_xlabel("Seconds from origin time", fontsize=label_fontsize)
+    ax.tick_params(axis="x", labelsize=tick_fontsize, length=7, width=1.4)
+    event_time = pd.to_datetime(row_event[catc.time], utc=True)
+    ax.set_title(f"event {row_event.get(catc.event_id, '')}  ·  {event_time:%Y-%m-%d %H:%M:%S} UTC"
+                 + (f"  ·  filter {freqmin:g}–{freqmax:g} Hz" if freqmin is not None and freqmax is not None else ""),
+                 loc="left", fontsize=title_fontsize)
+    fig.tight_layout()
 
-    # -------------------------
-    # Frame (spine) width
-    # -------------------------
-    for spine in ax.spines.values():
-        spine.set_linewidth(spine_width)
-
-    # -------------------------
-    # Legend
-    # -------------------------
-    leg = ax.get_legend()
-    if leg is not None:
-        for txt in leg.get_texts():
-            txt.set_fontsize(legend_fontsize)
-        leg.get_frame().set_linewidth(0.8)
-
-    # -------------------------
-    # Margins
-    # -------------------------
-    fig.subplots_adjust(
-        left=left,
-        right=right,
-        bottom=bottom,
-        top=top,
-    )
-
-    # -------------------------
-    # Optional saving
-    # -------------------------
     if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, format=save_format or (save_path.suffix.lstrip(".") or "png"),
+                    dpi=int(dpi), bbox_inches="tight", pad_inches=0.03)
 
-        if save_format is None:
-            save_format = save_path.suffix.replace(".", "")
-            if save_format == "":
-                save_format = "png"
-
-        fig.savefig(
-            save_path,
-            format=save_format,
-            dpi=int(dpi),
-            bbox_inches="tight",
-            pad_inches=0.03,
-        )
-
-    return fig, ax, meta
+    return fig, ax, {"files": files, "stations_used": [r[0] for r in rows]}
 
 
 # Backward-compatible private name from exploratory notebook.
