@@ -5,6 +5,18 @@ QQ_qc.py
 QC based on the energy-versus-velocity curve using percentiles:
 pc_ratio_energy = P(signal_percentile) / P(noise_percentile)
 
+Station normalization (--station_normalization):
+- "none" (default, the original QC): the curve averages the raw window energy of the
+  stations, in counts^2, so the station with the most counts (the nearest one, the one
+  with the highest gain or the noisiest one) controls the curve.
+- "noise": each station's window energy is first divided by that station's own
+  noise level (median energy of the minutes before origin), so every station is in "times above its own noise" (1 = noise) before the
+  stations are averaged. This is how waveform-stacking location methods treat stations:
+  they never stack raw amplitudes but per-station normalized characteristic functions,
+  most often STA/LTA, i.e. signal over the station's own recent noise (Kao & Shan 2004;
+  Grigoli et al. 2013; QuakeMigrate; review in Li et al. 2020, Rev. Geophys.,
+  doi:10.1029/2019RG000667).
+
 - Input:
     merged/output/{namebase}_hypodd_catalog.csv
     merged/input/{namebase}_picks_cleaned.csv
@@ -25,6 +37,7 @@ pc_ratio_energy = P(signal_percentile) / P(noise_percentile)
 
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
+from collections import OrderedDict
 import re
 from datetime import datetime
 from bisect import bisect_right
@@ -58,6 +71,21 @@ EPS = 1e-12               # numerical safety term (internal)
 MAX_EVENTS = 0            # --max_events: 0 = all events
 
 MIN_TOTAL_STATIONS = 4    # --min_total_stations
+
+STATION_NORMALIZATION = "none"  # --station_normalization: "none" (raw counts) or "noise"
+NOISE_WINDOW_S = 300.0    # --noise_window_s: seconds before origin where the noise level is measured
+                          # (median over that time, so earlier earthquakes filling less than half of it,
+                          # e.g. in swarms, barely move it)
+TAPER_S = 2.0             # seconds tapered at each end of the trace in "noise" mode (internal)
+GAP_FRACTION = 1e-3       # window energy below this fraction of the typical one = data gap (internal):
+                          # gaps are filled when the chunk is merged and have ~0 energy after filtering
+ONE_COUNT_NOISE = 1.0 / 12.0  # counts^2: variance of the rounding noise of a digitizer (uniform error of
+                          # +-0.5 count), the smallest noise a channel can resolve. A lower measured noise
+                          # means the ground noise is below one digital count (the trace is almost flat),
+                          # not that the site is that quiet, so the noise level is never taken below it (internal)
+
+NEIGHBOR_MARGIN_S = 60.0  # read a neighbor chunk only if the window is this close to its boundary (internal)
+FILE_CACHE_SIZE = 3       # waveform files kept in memory between events (internal)
 
 CHUNK_RE = re.compile(r"^\d{8}T\d{6}$")
 
@@ -94,8 +122,12 @@ def chunk_dirs_for_window(
     i1 = chunk_idx_for_time(t_end, times)
     a, b = i0, i1
     if pad_neighbors:
-        a = max(0, a - 1)
-        b = min(len(dirs) - 1, b + 1)
+        # Neighbor chunks only for windows near a chunk boundary: reading them for every
+        # event tripled the data read (one day file is ~200 MB) without changing any window.
+        if (t_start - times[i0]) < NEIGHBOR_MARGIN_S:
+            a = max(0, a - 1)
+        if i1 + 1 < len(times) and (times[i1 + 1] - t_end) < NEIGHBOR_MARGIN_S:
+            b = min(len(dirs) - 1, b + 1)
     return dirs[a:b + 1]
 
 
@@ -127,6 +159,22 @@ class StreamCache:
     def __init__(self):
         self._key = None
         self._st = None
+        # Last files read, as read from disk: when the next window needs another set of files
+        # (e.g. day d, then days d and d+1 near midnight), the ones already read are reused.
+        self._files: "OrderedDict[Path, Optional[obspy.Stream]]" = OrderedDict()
+
+    def _read_file(self, fp: Path) -> Optional[obspy.Stream]:
+        if fp in self._files:
+            self._files.move_to_end(fp)
+            return self._files[fp]
+        try:
+            s = read(str(fp))
+        except Exception:
+            s = None
+        self._files[fp] = s
+        while len(self._files) > FILE_CACHE_SIZE:
+            self._files.popitem(last=False)
+        return s
 
     def get_stream(
         self,
@@ -146,11 +194,11 @@ class StreamCache:
 
         st = None
         for fp in files:
-            try:
-                s = read(str(fp))
-                st = s if st is None else (st + s)
-            except Exception:
-                pass
+            s = self._read_file(fp)
+            if s is None:
+                continue
+            s = s.copy()   # the merge below works in place; the cached file stays as read
+            st = s if st is None else (st + s)
 
         if st is None:
             self._key = None
@@ -209,8 +257,13 @@ def stations_by_hypo_distance_km(
     return dict(zip(tmp["id"], tmp["hypo_km"]))
 
 
-def best_Z_channel_for_station(st: obspy.Stream, net_sta: str) -> Optional[str]:
+def best_Z_channel_for_station(st: obspy.Stream, net_sta: str, include_accelerometers: bool = False) -> Optional[str]:
     prefs = ["BHZ", "EHZ", "SHZ", "HHZ"]
+    if include_accelerometers:
+        # Only when energies are divided by each station's noise: counts of acceleration and
+        # counts of velocity cannot be averaged, but "times above its own noise" can.
+        # Velocity sensors are still preferred when a station has both.
+        prefs += ["HNZ", "ENZ"]
     chans = {tr.stats.channel for tr in st if f"{tr.stats.network}.{tr.stats.station}" == net_sta}
     for c in prefs:
         if c in chans:
@@ -257,6 +310,53 @@ def window_energy_stat(tr: obspy.Trace, t_abs: UTCDateTime, win_len_s: float, en
         return 0.0
 
     return float(val)
+
+
+def noise_level_before_origin(
+    tr: obspy.Trace,
+    t0: UTCDateTime,
+    window_s: float,
+    win_len_s: float,
+    energy_type: str = "squared_median",
+) -> Tuple[float, str]:
+    """
+    Noise level of one station before the origin time: the same statistic as
+    window_energy_stat (median of x^2, or median of the envelope), taken over all the
+    samples of the `window_s` seconds before origin instead of one short window. The
+    window ends 1 s before origin, so no energy of this event enters. The median ignores
+    earlier earthquakes as long as they fill less than half of that time (swarms).
+    Data gaps (filled when the chunk is merged, ~0 after filtering) are left out: the
+    window is cut in blocks of `win_len_s`, and blocks 1000x below the typical one are dropped.
+    Returns (level, "ok"), (one count, "floored") or (nan, reason).
+    """
+    sr = float(tr.stats.sampling_rate)
+    i0 = max(int((t0 - float(window_s) - tr.stats.starttime) * sr), 0)
+    i1 = max(int((t0 - 1.0 - tr.stats.starttime) * sr), 0)
+    x = tr.data[i0:i1].astype(np.float64, copy=False)
+    values = envelope(x) if energy_type == "envelope_median" else x ** 2
+
+    n_block = int(max(1, round(float(win_len_s) * sr)))
+    n_blocks = values.size // n_block
+    if n_blocks == 0:
+        return float("nan"), "noise_no_data"
+    blocks = values[:n_blocks * n_block].reshape(n_blocks, n_block)
+    block_level = np.median(blocks, axis=1)
+    if not np.any(block_level > 0.0):
+        return float("nan"), "noise_no_data"
+
+    typical = float(np.median(block_level[block_level > 0.0]))
+    not_gap = block_level > GAP_FRACTION * typical
+    if not_gap.sum() < 0.5 * n_blocks:
+        return float("nan"), "noise_mostly_gaps"
+
+    level = float(np.median(blocks[not_gap]))
+    # Floor of one digital count: a channel whose ground noise is below one count reads an almost
+    # flat trace, and dividing by that near-zero noise would make any signal look huge.
+    one_count = ONE_COUNT_NOISE if energy_type == "squared_median" else float(np.sqrt(ONE_COUNT_NOISE))
+    if level < one_count:
+        return one_count, "floored"
+
+    return level, "ok"
 
 
 def safe_percentile(x: np.ndarray, p: float) -> float:
@@ -385,6 +485,8 @@ def qc_one_event(
     vmax_signal: float = VMAX_SIGNAL,
     pad_neighbors: bool = PAD_NEIGHBORS,
     geom_correction: bool = GEOM_CORRECTION,
+    station_normalization: str = STATION_NORMALIZATION,
+    noise_window_s: float = NOISE_WINDOW_S,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -397,8 +499,16 @@ def qc_one_event(
     ev_depth_km = float(row_event.get("depth_km", 0.0))
     eid = int(row_event["event_id"])
 
-    t_start = t0 - float(pre_s)
-    t_end = t0 + float(post_s)
+    by_noise = station_normalization == "noise"
+    if by_noise:
+        # The noise level needs the minutes before origin; the taper is kept short (seconds,
+        # not a fraction of this longer trace) and the energy windows stay out of it.
+        # t_end and t_last are set below, once the station distances are known.
+        t_start = t0 - float(noise_window_s) - TAPER_S
+    else:
+        t_start = t0 - float(pre_s)
+        t_end = t0 + float(post_s)
+        t_last = t_end
 
     stations_with_picks = event_to_station_ids.get(eid, [])
     if len(stations_with_picks) == 0:
@@ -412,18 +522,28 @@ def qc_one_event(
     if len(dist_map) < int(min_total_stations):
         return build_skip_result(eid, "too_few_stations_in_metadata")
 
+    if by_noise:
+        # Every station enters every point of the curve: read far enough after origin for the
+        # farthest station's window at the slowest test velocity. With a fixed post_s, far
+        # stations drop out at slow velocities and the curve jumps where the set of stations changes.
+        reach_s = max(dist_map.values()) / float(np.min(v_grid)) + 0.5 * float(winlen)
+        t_last = t0 + max(float(post_s), reach_s)
+        t_end = t_last + TAPER_S
+
     st_raw, files = cache.get_stream(t_start, t_end, times, dirs, pad_neighbors=pad_neighbors)
     if st_raw is None:
         return build_skip_result(eid, "no_waveforms_loaded")
 
-    prepped: Dict[str, Tuple[obspy.Trace, float]] = {}
+    prepped: Dict[str, Tuple[obspy.Trace, float, float]] = {}
+    dropped: Dict[str, str] = {}   # station -> why it was left out ("noise" mode)
+    floored: List[str] = []        # stations whose noise was raised to one digital count ("noise" mode)
     for sid, dkm in dist_map.items():
         parts = sid.split(".")
         if len(parts) < 2:
             continue
         net, sta = parts[0], parts[1]
 
-        chz = best_Z_channel_for_station(st_raw, f"{net}.{sta}")
+        chz = best_Z_channel_for_station(st_raw, f"{net}.{sta}", include_accelerometers=by_noise)
         if chz is None:
             continue
 
@@ -431,10 +551,13 @@ def qc_one_event(
         if not tr_list:
             continue
 
-        tr = tr_list[0].copy()
+        tr = tr_list[0].slice(t_start, t_end).copy()   # copy the window only, not the whole day
         tr.trim(t_start, t_end, pad=True, fill_value=0)
         tr.detrend("demean")
-        tr.taper(max_percentage=0.05, type="cosine")
+        if by_noise:
+            tr.taper(max_percentage=0.05, type="cosine", max_length=TAPER_S)
+        else:
+            tr.taper(max_percentage=0.05, type="cosine")
 
         sr = float(tr.stats.sampling_rate)
         nyq = 0.5 * sr
@@ -443,7 +566,18 @@ def qc_one_event(
         if fmax > fmin:
             tr.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
 
-        prepped[sid] = (tr, float(dkm))
+        noise_level = 1.0
+        if by_noise:
+            noise_level, why = noise_level_before_origin(
+                tr, t0, noise_window_s, winlen, energy_type=energy_type,
+            )
+            if why == "floored":
+                floored.append(f"{net}.{sta}")
+            elif why != "ok":
+                dropped[f"{net}.{sta}"] = why
+                continue
+
+        prepped[sid] = (tr, float(dkm), float(noise_level))
 
     if len(prepped) < int(min_total_stations):
         return build_skip_result(eid, "too_few_prepped_stations")
@@ -457,13 +591,13 @@ def qc_one_event(
         Ev_sum = 0.0
         n_valid = 0
 
-        for _, (tr, dkm) in prepped.items():
+        for _, (tr, dkm, noise_level) in prepped.items():
             t_abs = t0 + (dkm * inv_v)
 
-            if (t_abs - half) < t_start or (t_abs + half) > t_end:
+            if (t_abs - half) < t_start or (t_abs + half) > t_last:
                 continue
 
-            
+
             E = window_energy_stat(
                 tr,
                 t_abs,
@@ -475,6 +609,9 @@ def qc_one_event(
 
             if geom_correction:
                 E *= (dkm ** 2)
+
+            # "noise" mode: times above this station's own noise level (1 = its noise)
+            E /= noise_level
 
             Ev_sum += E
             n_valid += 1
@@ -549,7 +686,8 @@ def qc_one_event(
         )
 
         ax.set_xlabel("Velocity (km/s)", fontsize=label_fontsize, labelpad=10)
-        ax.set_ylabel("Stacked Energy", fontsize=label_fontsize, labelpad=10)
+        ax.set_ylabel("Stacked Energy / noise" if by_noise else "Stacked Energy",
+                      fontsize=label_fontsize, labelpad=10)
 
         ax.tick_params(
             axis="both",
@@ -591,12 +729,18 @@ def qc_one_event(
 
         plt.close(fig)
 
-    return {
+    result = {
         "event_id": eid,
         "pc_ratio_energy": float(ratio),
         "qc_status": "computed",
         "qc_reason": "computed",
     }
+    if by_noise:
+        # which stations entered the curve, and which were left out and why (for checking)
+        result["qc_n_stations"] = len(prepped)
+        result["qc_stations_dropped"] = ";".join(f"{k}:{v}" for k, v in sorted(dropped.items()))
+        result["qc_stations_floored"] = ";".join(sorted(floored))
+    return result
 
 
 # -------------------------
@@ -667,6 +811,13 @@ def main():
                     help="Multiply window energy by distance^2 (geometric spreading correction)")
     ap.add_argument("--max_events", type=int, default=MAX_EVENTS,
                     help="Process only the first N events; 0 = all (default: 0)")
+    ap.add_argument("--station_normalization", choices=["none", "noise"], default=STATION_NORMALIZATION,
+                    help="'none': average raw window energies (counts^2), the original QC; "
+                         "'noise': divide each station's energies by its own noise level first "
+                         f"(default: {STATION_NORMALIZATION})")
+    ap.add_argument("--noise_window_s", type=float, default=NOISE_WINDOW_S,
+                    help="'noise' mode: seconds before origin where the noise level (median energy) is measured "
+                         f"(default: {NOISE_WINDOW_S})")
 
     args = ap.parse_args()
     min_total_stations = int(args.min_total_stations)
@@ -701,7 +852,10 @@ def main():
     rows = []
     n_total = len(catalog) if int(args.max_events) <= 0 else min(len(catalog), int(args.max_events))
 
-    for i in range(n_total):
+    # Events in time order, so the waveform files of a day are read once for all its events
+    # (the HypoDD catalog is not in time order). The outputs keep the catalog's order.
+    time_order = catalog.iloc[:n_total]["time"].argsort(kind="stable").to_numpy()
+    for k, i in enumerate(time_order):
         row_event = catalog.iloc[i]
         do_plot = bool(args.make_plot) and (plots_left > 0)
 
@@ -730,6 +884,8 @@ def main():
             vmax_signal=args.vmax_signal,
             pad_neighbors=not args.no_pad_neighbors,
             geom_correction=args.geom_correction,
+            station_normalization=args.station_normalization,
+            noise_window_s=args.noise_window_s,
         )
 
         rows.append(r)
@@ -737,8 +893,8 @@ def main():
         if do_plot and r.get("qc_status") == "computed":
             plots_left -= 1
 
-        if (i + 1) % 500 == 0 or (i + 1) == n_total:
-            print(f"[QC] processed {i + 1}/{n_total} events")
+        if (k + 1) % 500 == 0 or (k + 1) == n_total:
+            print(f"[QC] processed {k + 1}/{n_total} events")
 
     qc_df = pd.DataFrame(rows)
 
@@ -750,8 +906,10 @@ def main():
         qc_merge["event_id"] = pd.to_numeric(qc_merge["event_id"], errors="coerce").astype("Int64")
         qc_merge["pc_ratio_energy"] = pd.to_numeric(qc_merge["pc_ratio_energy"], errors="coerce").round(2)
 
+        qc_cols = ["event_id", "pc_ratio_energy", "qc_status", "qc_reason"]
+        qc_cols += [c for c in ("qc_n_stations", "qc_stations_dropped", "qc_stations_floored") if c in qc_merge.columns]
         raw_out = raw_out.merge(
-            qc_merge[["event_id", "pc_ratio_energy", "qc_status", "qc_reason"]],
+            qc_merge[qc_cols],
             left_on="_event_id_num",
             right_on="event_id",
             how="left",
@@ -820,6 +978,20 @@ def main():
     if len(skipped) > 0:
         print("\nTop skipped reasons:")
         print(skipped["qc_reason"].value_counts().to_string())
+
+    if "qc_stations_dropped" in raw_out.columns:
+        reasons = raw_out["qc_stations_dropped"].dropna().astype(str).str.split(";").explode()
+        reasons = reasons[reasons.str.len() > 0].str.split(":").str[-1]
+        if len(reasons) > 0:
+            print("\nStations left out of an event's curve ('noise' mode), by reason:")
+            print(reasons.value_counts().to_string())
+
+    if "qc_stations_floored" in raw_out.columns:
+        floored = raw_out["qc_stations_floored"].dropna().astype(str).str.split(";").explode()
+        floored = floored[floored.str.len() > 0]
+        if len(floored) > 0:
+            print("\nStations whose noise was raised to one digital count ('noise' mode):")
+            print(floored.value_counts().to_string())
 
 
 if __name__ == "__main__":

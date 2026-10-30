@@ -93,6 +93,7 @@ The settings you will change most often:
 | `location_p_model`, `location_s_model` | Velocity models: a file in `hypox_templates/` or a path to your own `.cre` file. HypoInverse and HypoDD both use them: `QQ_location.py` writes them into HypoDD's parameter file |
 | `location_ref_ele` | Reference elevation of the velocity models (highest station or topography, km). HypoInverse and HypoDD measure depth from it, so events in the volcanic edifice are kept; the final catalogs give depth below sea level |
 | `qc_max_plots` | Number of QC figures (default 20; `None` = one for every event) |
+| `qc_station_normalization` | `"none"` (default): the QC curve averages raw window energies in counts², so the station with the most counts controls it. `"noise"`: each station is first divided by its own noise level (median energy of the `qc_noise_window_s` seconds before origin), so every station counts in "times above its own noise" |
 
 Use one project folder per region and period: the merge step combines **every** chunk folder inside `data/`.
 

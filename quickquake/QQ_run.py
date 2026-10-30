@@ -124,6 +124,8 @@ DEFAULTS = {
     "qc_pad_neighbors": True,
     "qc_geom_correction": False,
     "qc_max_events": 0,
+    "qc_station_normalization": "none",
+    "qc_noise_window_s": 300.0,
 }
 COMPUTED = ["BASE_DIR", "DATA_ROOT", "MODEL_DIR", "location_templates_dir"]
 
@@ -468,6 +470,8 @@ def main():
             "--vmin_signal", str(qc_vmin_signal),
             "--vmax_signal", str(qc_vmax_signal),
             "--max_events", str(qc_max_events),
+            "--station_normalization", str(qc_station_normalization),
+            "--noise_window_s", str(qc_noise_window_s),
         ]
 
         if qc_make_plot:
