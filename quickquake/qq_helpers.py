@@ -8367,6 +8367,17 @@ def plot_event_moveout_pretty(
     return fig, ax, {"files": files, "stations_used": [r[0] for r in rows]}
 
 
+def event_ids_from_qc_plots(qc_plot_dir):
+    """
+    Event ids that have a QC figure in qc_plot_dir, in time order.
+
+    QQ_qc.py --make_plot names its figures qc_event{event_id}_{YYYYmmddTHHMMSS}.png; use these ids to draw
+    the move out of the same events and compare it with the QC curve.
+    """
+    stems = sorted((p.stem for p in Path(qc_plot_dir).glob("qc_event*_*.png")), key=lambda s: s.split("_")[2])
+    return [int(s.split("_")[1][len("event"):]) for s in stems]
+
+
 # Backward-compatible private name from exploratory notebook.
 _draw_3d_box_edges = draw_3d_box_edges
 _style_3d_axes = style_3d_axes
@@ -8397,6 +8408,7 @@ __all__ = [
     "window_l2_energy",
     "plot_event_moveout_picks_only",
     "plot_event_moveout_pretty",
+    "event_ids_from_qc_plots",
     "plot_event_spectrograms_vertical_picks_only",
     "ellipse_lonlat_from_km",
     "plot_catalog_3d_topo_seismicity",

@@ -111,7 +111,10 @@ DEFAULTS = {
     "qc_winlen": 3,
     "qc_noise_percentile": 50.0,
     "qc_signal_percentile": 90.0,
-    "qc_min_ratio": 3.0,
+    "qc_min_ratio": 4.0,
+    "qc_only_apply_threshold": False,
+    "qc_glitch_min_stations": 2,
+    "qc_glitch_min_seconds": 1.0,
     "qc_energy_type": "squared_median",
     "qc_make_plot": True,
     "qc_max_plots": 20,
@@ -472,8 +475,12 @@ def main():
             "--max_events", str(qc_max_events),
             "--station_normalization", str(qc_station_normalization),
             "--noise_window_s", str(qc_noise_window_s),
+            "--glitch_min_stations", str(qc_glitch_min_stations),
+            "--glitch_min_seconds", str(qc_glitch_min_seconds),
         ]
 
+        if qc_only_apply_threshold:
+            cmd_qc.append("--only_apply_threshold")
         if qc_make_plot:
             cmd_qc.append("--make_plot")
         if not qc_pad_neighbors:
@@ -483,4 +490,4 @@ def main():
         if qc_min_valid_stations_per_v is not None:
             cmd_qc += ["--min_valid_stations_per_v", str(qc_min_valid_stations_per_v)]
 
-        run_step(cmd_qc, "QC: velocity percentile ratio filter", cwd=BASE_DIR)
+        run_step(cmd_qc, "QC: glitches, velocity percentile ratio, threshold", cwd=BASE_DIR)

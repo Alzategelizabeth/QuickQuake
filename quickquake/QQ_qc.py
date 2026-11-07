@@ -2,8 +2,18 @@
 """
 QQ_qc.py
 
-QC based on the energy-versus-velocity curve using percentiles:
-pc_ratio_energy = P(signal_percentile) / P(noise_percentile)
+Quality control of the relocated catalog, in three steps:
+
+  1. Glitches: test every event of the HypoDD catalog for telemetry failures (QQ_glitch.py). Events that fail go to
+     the glitch file, the rest continue.
+  2. QC value: for every event left, compute the energy-versus-velocity curve and its percentile ratio:
+         pc_ratio_energy = P(signal_percentile) / P(noise_percentile)     (by default P90 / P50)
+     All events and their values are saved in the noglitch file. The value does not depend on any threshold.
+  3. Threshold: --min_ratio, chosen by the user, splits the events into accepted (value >= min_ratio, the final
+     catalog) and rejected (value < min_ratio). Events whose value could not be computed go to skipped.
+
+To try another threshold without computing anything again, use --only_apply_threshold: it repeats step 3 only, from
+the values already saved in the noglitch file.
 
 Station normalization (--station_normalization):
 - "none" (default, the original QC): the curve averages the raw window energy of the
@@ -22,17 +32,23 @@ Station normalization (--station_normalization):
     merged/input/{namebase}_picks_cleaned.csv
     merged/input/{namebase}_station_list.json
 
-- Output:
-    1) merged/output/{namebase}_hypodd_catalog_qcfiltered.csv
-       (base HypoDD catalog + pc_ratio_energy, only events that passed)
+- Output, in the order of the steps:
+    1) merged/output/{namebase}_hypodd_catalog_glitch.csv
+       (base HypoDD catalog + stations stuck before their pick, the events removed as glitches)
 
-    2) merged/output/{namebase}_hypodd_catalog_qcrejected.csv
-       (base HypoDD catalog + pc_ratio_energy, only events with a computed ratio that did NOT pass)
+    2) merged/output/{namebase}_hypodd_catalog_noglitch.csv
+       (base HypoDD catalog + QC columns, every event that is not a glitch, with its pc_ratio_energy)
 
-    3) merged/output/{namebase}_hypodd_catalog_qcskipped.csv
-       (base HypoDD catalog + QC columns, events for which the ratio could NOT be computed)
+    3) merged/output/{namebase}_hypodd_catalog_noglitch_qcaccepted.csv
+       (base HypoDD catalog + pc_ratio_energy, events with a value >= min_ratio: THE FINAL CATALOG)
 
-    4) (optional) merged/output/qc_plots_{namebase}/qc_eventXXXX_YYYYmmddTHHMMSS.png
+    4) merged/output/{namebase}_hypodd_catalog_noglitch_qcrejected.csv
+       (base HypoDD catalog + pc_ratio_energy, events with a value < min_ratio)
+
+    5) merged/output/{namebase}_hypodd_catalog_noglitch_qcskipped.csv
+       (base HypoDD catalog + QC columns, events for which the value could NOT be computed)
+
+    6) (optional) merged/output/qc_plots_{namebase}/qc_eventXXXX_YYYYmmddTHHMMSS.png
 """
 
 from pathlib import Path
@@ -49,6 +65,8 @@ import obspy
 from obspy import read, UTCDateTime
 from obspy.signal.filter import envelope
 from obspy.geodetics.base import gps2dist_azimuth
+
+from QQ_glitch import find_glitches, MIN_STUCK_SECONDS, MIN_STUCK_STATIONS
 
 
 # ============================================================
@@ -408,15 +426,19 @@ def resolve_paths(data_root: Path, namebase: str):
     if not catalog_csv.exists():
         raise FileNotFoundError(f"Expected HypoDD catalog not found: {catalog_csv}")
 
-    qc_filtered_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_qcfiltered.csv"
-    qc_rejected_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_qcrejected.csv"
-    qc_skipped_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_qcskipped.csv"
+    glitch_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_glitch.csv"
+    noglitch_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_noglitch.csv"
+    qc_accepted_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_noglitch_qcaccepted.csv"
+    qc_rejected_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_noglitch_qcrejected.csv"
+    qc_skipped_catalog_csv = merged_out / f"{namebase}_hypodd_catalog_noglitch_qcskipped.csv"
 
     return (
         catalog_csv,
         picks_csv,
         stations_json,
-        qc_filtered_catalog_csv,
+        glitch_catalog_csv,
+        noglitch_catalog_csv,
+        qc_accepted_catalog_csv,
         qc_rejected_catalog_csv,
         qc_skipped_catalog_csv,
     )
@@ -456,6 +478,47 @@ def load_inputs(catalog_csv: Path, picks_csv: Path, stations_json: Path):
     return catalog_raw, catalog, picks, stations
 
 
+def remove_glitches(catalog_raw, catalog, picks, times, dirs, glitch_csv, max_events, min_stuck_stations, min_stuck_seconds):
+    """Step 1: save the events that are glitches, and return the two catalogs without them."""
+    to_test = catalog if max_events <= 0 else catalog.iloc[:max_events]
+    results = find_glitches(to_test, picks, times, dirs, min_stuck_stations, min_stuck_seconds)
+    glitches = results[results["is_glitch"]].drop(columns="is_glitch")
+    glitch_ids = set(glitches["event_id"].astype(int))
+
+    raw_ids = pd.to_numeric(catalog_raw["event_id"], errors="coerce")
+    glitch_rows = catalog_raw[raw_ids.isin(glitch_ids)].merge(glitches, on="event_id")
+    glitch_rows.to_csv(glitch_csv, index=False)
+    print(f"\nGlitches: {len(glitch_rows)} of {len(to_test)} events tested. Wrote {glitch_csv}")
+    n_untested = int((results["n_tested"] == 0).sum())
+    if n_untested:
+        print(f"Events with no station that could be tested for glitches: {n_untested}")
+
+    return (catalog_raw[~raw_ids.isin(glitch_ids)].reset_index(drop=True),
+            catalog[~catalog["event_id"].isin(glitch_ids)].reset_index(drop=True))
+
+
+def split_by_threshold(table, min_ratio, accepted_csv, rejected_csv, skipped_csv):
+    """Step 3: split the events by their QC value. Accepted is the final catalog."""
+    accepted = table[table["pc_ratio_energy"] >= float(min_ratio)]
+    rejected = table[table["pc_ratio_energy"] < float(min_ratio)]
+    skipped = table[table["pc_ratio_energy"].isna()]
+
+    diagnostic_columns = ["qc_status", "qc_reason"]
+    accepted.drop(columns=diagnostic_columns, errors="ignore").to_csv(accepted_csv, index=False)
+    rejected.drop(columns=diagnostic_columns, errors="ignore").to_csv(rejected_csv, index=False)
+    skipped.to_csv(skipped_csv, index=False)
+
+    print(f"\nWrote accepted catalog: {accepted_csv}")
+    print(f"Wrote rejected catalog: {rejected_csv}")
+    print(f"Wrote skipped catalog:  {skipped_csv}")
+    print(f"\nAccepted {len(accepted)} / {len(table)} events with pc_ratio_energy >= {min_ratio}")
+    print(f"Rejected {len(rejected)} / {len(table)} events with pc_ratio_energy < {min_ratio}")
+    print(f"Skipped (no QC value) {len(skipped)} / {len(table)} events")
+    if len(skipped) > 0 and "qc_reason" in skipped.columns:
+        print("\nTop skipped reasons:")
+        print(skipped["qc_reason"].value_counts().to_string())
+
+
 # -------------------------
 # QC core (single event)
 # -------------------------
@@ -487,6 +550,7 @@ def qc_one_event(
     geom_correction: bool = GEOM_CORRECTION,
     station_normalization: str = STATION_NORMALIZATION,
     noise_window_s: float = NOISE_WINDOW_S,
+    return_curve: bool = False,
 ):
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
@@ -740,6 +804,9 @@ def qc_one_event(
         result["qc_n_stations"] = len(prepped)
         result["qc_stations_dropped"] = ";".join(f"{k}:{v}" for k, v in sorted(dropped.items()))
         result["qc_stations_floored"] = ";".join(sorted(floored))
+    if return_curve:
+        # for figures: the curve and the traces exactly as this QC used them (station -> (trace, km, noise))
+        result.update(v_grid=v_grid, energies=energies, e_noise=e_noise, e_signal=e_signal, prepped=prepped)
     return result
 
 
@@ -748,7 +815,7 @@ def qc_one_event(
 # -------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="QuickQuake QC: velocity energy curve + percentile ratio filter")
+    ap = argparse.ArgumentParser(description="QuickQuake QC: glitches, then velocity energy curve + percentile ratio, then threshold")
 
     ap.add_argument("--data_root", required=True, type=str, help="QuickQuake data root (contains merged/)")
     ap.add_argument("--namebase", required=True, type=str, help="Namebase, e.g., GAMMA")
@@ -769,9 +836,18 @@ def main():
     ap.add_argument(
         "--min_ratio",
         type=float,
-        default=2.0,
-        help="Keep events with pc_ratio_energy >= min_ratio",
+        default=4.0,
+        help="Threshold: accept events with pc_ratio_energy >= min_ratio",
     )
+    ap.add_argument(
+        "--only_apply_threshold",
+        action="store_true",
+        help="Compute nothing: split the noglitch file by --min_ratio, using the QC values it already holds",
+    )
+    ap.add_argument("--glitch_min_stations", type=int, default=MIN_STUCK_STATIONS,
+                    help=f"An event is a glitch if this many of its stations were stuck before their pick (default: {MIN_STUCK_STATIONS})")
+    ap.add_argument("--glitch_min_seconds", type=float, default=MIN_STUCK_SECONDS,
+                    help=f"Shortest stretch without change that counts as stuck, in seconds (default: {MIN_STUCK_SECONDS})")
 
     ap.add_argument("--make_plot", action="store_true", help="Save QC plots to merged/output/qc_plots_{namebase}/")
     ap.add_argument(
@@ -834,16 +910,34 @@ def main():
         catalog_csv,
         picks_csv,
         stations_json,
-        qc_filtered_catalog_csv,
+        glitch_catalog_csv,
+        noglitch_catalog_csv,
+        qc_accepted_catalog_csv,
         qc_rejected_catalog_csv,
         qc_skipped_catalog_csv,
     ) = resolve_paths(data_root, namebase)
+
+    # Only step 3: the QC values are already saved
+    if args.only_apply_threshold:
+        if not noglitch_catalog_csv.exists():
+            raise SystemExit(f"{noglitch_catalog_csv} does not exist: run the QC once without --only_apply_threshold")
+        table = pd.read_csv(noglitch_catalog_csv)
+        if "pc_ratio_energy" not in table.columns:
+            raise SystemExit(f"{noglitch_catalog_csv} has no pc_ratio_energy: run the QC once without --only_apply_threshold")
+        split_by_threshold(table, args.min_ratio, qc_accepted_catalog_csv, qc_rejected_catalog_csv, qc_skipped_catalog_csv)
+        return
 
     catalog_raw, catalog, picks_clean, stations = load_inputs(catalog_csv, picks_csv, stations_json)
     event_to_station_ids = build_event_pick_index(picks_clean)
 
     times, dirs = build_chunk_index(data_root)
     cache = StreamCache()
+
+    # Step 1: glitches
+    catalog_raw, catalog = remove_glitches(catalog_raw, catalog, picks_clean, times, dirs, glitch_catalog_csv,
+                                           int(args.max_events), args.glitch_min_stations, args.glitch_min_seconds)
+
+    # Step 2: QC value of every event left
 
     plot_dir = data_root / "merged" / "output" / f"qc_plots_{namebase}"
     plots_left = np.inf if args.max_plots is None else int(args.max_plots)
@@ -934,50 +1028,16 @@ def main():
     raw_out["qc_status"] = raw_out["qc_status"].fillna("skipped")
     raw_out["qc_reason"] = raw_out["qc_reason"].fillna("missing_after_merge")
 
-    passed_mask = (
-        raw_out["pc_ratio_energy"].notna()
-        & (raw_out["pc_ratio_energy"] >= float(args.min_ratio))
-    )
+    # All the events that are not glitches, with their QC value
+    raw_out.to_csv(noglitch_catalog_csv, index=False)
+    print(f"\nWrote every event without glitches and its QC value: {noglitch_catalog_csv}")
 
-    rejected_mask = (
-        raw_out["pc_ratio_energy"].notna()
-        & (raw_out["pc_ratio_energy"] < float(args.min_ratio))
-    )
-
-    skipped_mask = raw_out["pc_ratio_energy"].isna()
-
-    filtered = raw_out[passed_mask].copy()
-    rejected = raw_out[rejected_mask].copy()
-    skipped = raw_out[skipped_mask].copy()
-
-    # Remove diagnostic columns from filtered and rejected outputs
-    cols_to_drop_final = [c for c in ["qc_status", "qc_reason"] if c in filtered.columns]
-    if cols_to_drop_final:
-        filtered = filtered.drop(columns=cols_to_drop_final)
-
-    cols_to_drop_final = [c for c in ["qc_status", "qc_reason"] if c in rejected.columns]
-    if cols_to_drop_final:
-        rejected = rejected.drop(columns=cols_to_drop_final)
-
-    filtered.to_csv(qc_filtered_catalog_csv, index=False)
-    rejected.to_csv(qc_rejected_catalog_csv, index=False)
-    skipped.to_csv(qc_skipped_catalog_csv, index=False)
-
-    print(f"\nWrote filtered catalog: {qc_filtered_catalog_csv}")
-    print(f"Wrote rejected catalog: {qc_rejected_catalog_csv}")
-    print(f"Wrote skipped catalog:  {qc_skipped_catalog_csv}")
+    # Step 3: threshold
+    split_by_threshold(raw_out, args.min_ratio, qc_accepted_catalog_csv, qc_rejected_catalog_csv, qc_skipped_catalog_csv)
 
     if bool(args.make_plot):
         limit = "all" if args.max_plots is None else f"up to {int(args.max_plots)}"
         print(f"Wrote {limit} plots in: {plot_dir}")
-
-    print(f"\nKept {len(filtered)} / {len(raw_out)} events with pc_ratio_energy >= {args.min_ratio}")
-    print(f"Rejected by ratio {len(rejected)} / {len(raw_out)} events")
-    print(f"Skipped (no QC computed) {len(skipped)} / {len(raw_out)} events")
-
-    if len(skipped) > 0:
-        print("\nTop skipped reasons:")
-        print(skipped["qc_reason"].value_counts().to_string())
 
     if "qc_stations_dropped" in raw_out.columns:
         reasons = raw_out["qc_stations_dropped"].dropna().astype(str).str.split(";").explode()

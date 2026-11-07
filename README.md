@@ -92,6 +92,8 @@ The settings you will change most often:
 | `gamma_use_dbscan` | `True` (default): DBSCAN groups on several CPUs (`gamma_ncpu`), much faster. `False`: one job on one CPU (original method); choose `gamma_dbscan_eps` by comparing DBSCAN on and off on one chunk (see the comments in `QQ_driver.py`) |
 | `location_p_model`, `location_s_model` | Velocity models: a file in `hypox_templates/` or a path to your own `.cre` file. HypoInverse and HypoDD both use them: `QQ_location.py` writes them into HypoDD's parameter file |
 | `location_ref_ele` | Reference elevation of the velocity models (highest station or topography, km). HypoInverse and HypoDD measure depth from it, so events in the volcanic edifice are kept; the final catalogs give depth below sea level |
+| `qc_min_ratio` | QC threshold: events with a QC value at or above it are accepted (default 4.0, chosen at Aniakchak; choose yours from `..._noglitch.csv`) |
+| `qc_only_apply_threshold` | `True`: compute nothing and only split the events again with a new `qc_min_ratio` (default `False`) |
 | `qc_max_plots` | Number of QC figures (default 20; `None` = one for every event) |
 | `qc_station_normalization` | `"none"`: the QC curve averages raw window energies in counts², so the station with the most counts controls it. `"noise"` (default, with `qc_min_ratio = 3`): each station is first divided by its own noise level (median energy of the `qc_noise_window_s` seconds before origin), so every station counts in "times above its own noise" |
 
@@ -107,8 +109,10 @@ Inside the `data/` folder next to your driver:
 | `merged/gammacatalog_id.csv`, `merged/gammapicks_id.csv` | All GaMMA events and picks; `event_id` is `<chunk>_<index>`, and `<chunk>_-1` marks picks not linked to any event |
 | `merged/output/GAMMA_hypoinv_good.csv` | HypoInverse locations that passed quality checks |
 | `merged/output/GAMMA_hypodd_catalog.csv` | HypoDD relocated catalog |
-| `merged/output/GAMMA_hypodd_catalog_qcfiltered.csv` | **Final catalog**: relocated events that passed QC |
-| `merged/output/..._qcrejected.csv`, `..._qcskipped.csv` | Events that failed QC, or could not be tested  |
+| `merged/output/GAMMA_hypodd_catalog_glitch.csv` | QC step 1: events removed as glitches (telemetry failures) |
+| `merged/output/GAMMA_hypodd_catalog_noglitch.csv` | QC step 2: every other event, with its QC value P90/P50 (`pc_ratio_energy`). Look here to choose `qc_min_ratio` |
+| `merged/output/GAMMA_hypodd_catalog_noglitch_qcaccepted.csv` | QC step 3: **final catalog**, events with a value of at least `qc_min_ratio` |
+| `merged/output/..._noglitch_qcrejected.csv`, `..._noglitch_qcskipped.csv` | QC step 3: events below `qc_min_ratio`, or whose value could not be computed |
 | `merged/output/qc_plots_GAMMA/` | QC figures  |
 
 
@@ -138,7 +142,7 @@ You only run `QQ_driver.py`; `QQ_run.py` calls the scripts below in order.
 | `QQ_merge_gamma_outputs.py` | Combines all chunks into `merged/` |
 | `QQ_pick_arpick.py` | Optional pick refinement with ObsPy `ar_pick` |
 | `QQ_location.py` | HypoInverse + HypoDD through HypoXPy |
-| `QQ_qc.py` | Quality control and QC figures |
+| `QQ_qc.py` | Quality control and QC figures: glitches (`QQ_glitch.py`), QC value of every event, threshold |
 | `qq_helpers.py` | Plotting functions used by the notebooks (the 3D views get the elevation grid with `load_earth_relief`, which reads the same SRTM15+ files as pygmt without needing GMT) |
 
 | Notebook | Use |

@@ -138,8 +138,16 @@ location_combine_net_sta = "yes"  # HypoDD station names: "yes" = NET.STA, "no" 
 
 
 RUN_QC= True
-# qc options (user edits)
-qc_min_total_stations = 3 #must be a positive number 
+# The QC has three steps: (1) remove glitches (telemetry failures), (2) compute the QC value P90/P50 of every event
+# left, (3) split them with your threshold, qc_min_ratio, into accepted (the final catalog) and rejected.
+# Main QC options (user edits)
+qc_min_ratio = 4.0  # your threshold. To choose it: look at pc_ratio_energy in ..._hypodd_catalog_noglitch.csv.
+                    # 4.0 was chosen on labelled Aniakchak events (qc_station_normalization = "noise"; 2026-11-05)
+qc_only_apply_threshold = False  # True: compute nothing, only split the events again with a new qc_min_ratio
+qc_glitch_min_stations = 2       # glitch: this many of an event's stations were stuck before their pick
+qc_glitch_min_seconds = 1.0      # stuck: the count does not change for this many seconds
+# Other QC options
+qc_min_total_stations = 3 #must be a positive number
 qc_min_valid_stations_per_v = None  # None = defaults to qc_min_total_stations
 qc_vmin_curve   = 2.0
 qc_vmax_curve   = 8.0
@@ -147,7 +155,6 @@ qc_vsteps_curve = 150
 qc_winlen = 3
 qc_noise_percentile  = 50.0
 qc_signal_percentile = 90.0
-qc_min_ratio = 3.0  # with qc_station_normalization = "noise"; chosen on 150 labelled Aniakchak events (2026-10-30)
 qc_energy_type = "squared_median" # other option is "envelope_median" or "squared_median"
 qc_make_plot = True
 qc_max_plots = 20 # number of QC figures; set to None to plot every event
