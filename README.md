@@ -22,7 +22,7 @@ This repository contains the Python scripts for wrapping up and streamlining the
 |---|---|
 | `quickquake/QQ_driver.py` | **The file you edit**: only settings (the code that runs them is `quickquake/QQ_run.py`) |
 | `quickquake/` | The scripts of each step (see section 6) |
-| `examples/` | A ready-to-run driver: Pavlof Volcano (Alaska) |
+| `examples/` | A ready-to-run example with its notebooks: one day at Aniakchak volcano (Alaska) |
 | `hypox_templates/` | Velocity models and HypoInverse/HypoDD parameter templates |
 | `dependencies/` | Source code of PhaseNet, GaMMA and HypoXPy (HypoXPy includes HypoInverse and HypoDD) |
 | `install.sh` | The installer just run once|
@@ -55,10 +55,10 @@ The notebooks run in the same `quickquake` environment (in VS Code: *Select Kern
 ## 2. Run the example
 
 ```bash
-python examples/pavlof_2021/QQ_driver.py
+python examples/aniakchak_2023/QQ_driver.py
 ```
 
-This processes 16 hours of data from Pavlof Volcano, Alaska (about 10 minutes); results go to `examples/pavlof_2021/data/`.
+This processes one day of data (12 March 2023) from Aniakchak volcano, Alaska, with the settings of the 2021–2024 Aniakchak catalog (about 10 minutes, most of it PhaseNet); results go to `examples/aniakchak_2023/data/`. Then open the two notebooks of the example folder: `catalog_visualization.ipynb` (maps, timelines, cross section, 3D views, location changes, move-outs, spectrograms and the QC figure of single events) and `catalog_analysis.ipynb` (catalog summary, comparison with the USGS ComCat and AVO events of that day in `reference_catalogs/`, magnitude of completeness).
 
 ## 3. Your own project
 
@@ -71,7 +71,7 @@ Keep the code and your projects in separate folders, so each project keeps its o
     data/                         created by QuickQuake: chunks, merged results, logs
 ```
 
-1. Copy `quickquake/QQ_driver.py` (or one of the examples) into your project folder.
+1. Copy `quickquake/QQ_driver.py` (or the driver of the example) into your project folder.
 2. At the top, set `QUICKQUAKE_DIR` to the folder where QuickQuake is installed, e.g. `"~/src/QuickQuake"`.
 3. Edit the settings in the CONFIGURATION section and run it: `python ~/research/my_region/QQ_driver.py`
 
@@ -142,17 +142,17 @@ You only run `QQ_driver.py`; `QQ_run.py` calls the scripts below in order.
 | `QQ_merge_gamma_outputs.py` | Combines all chunks into `merged/` |
 | `QQ_pick_arpick.py` | Optional pick refinement with ObsPy `ar_pick` |
 | `QQ_location.py` | HypoInverse + HypoDD through HypoXPy |
-| `QQ_qc.py` | Quality control and QC figures: glitches (`QQ_glitch.py`), QC value of every event, threshold |
+| `QQ_qc.py` | Quality control: glitches (`QQ_glitch.py`), QC value of every event, threshold, and the QC figure (move out on top, energy-velocity curve below) of `qc_max_plots` random events in `merged/output/qc_plots_<namebase>/` |
 | `qq_helpers.py` | Plotting functions used by the notebooks (the 3D views get the elevation grid with `load_earth_relief`, which reads the same SRTM15+ files as pygmt without needing GMT) |
 
 | Notebook | Use |
 |---|---|
-| `quickquake/visualization.ipynb` | Maps, 3D views, cross-sections and timelines of the catalog |
-| `quickquake/catalog_visualization_clean.ipynb` | Publication figures of the final catalog (daily counts, maps, zoom, timeline, cross-section); figures are saved in `data/images/` |
-| `quickquake/qc_inspection.ipynb` | Inspect the QC energy-versus-velocity curves |
+| `quickquake/visualization.ipynb` | Maps, timelines, cross section, 3D views, location changes between pipeline stages, move-outs, spectrograms, and the QC figure of single events (move out at hypocentral distance and energy-velocity curve, computed again with the QC settings of your driver); figures are saved in `data/images/visualization/` |
+| `quickquake/catalog_analysis.ipynb` | Catalog summary, comparison with reference catalogs, magnitude of completeness, temporal evolution, FI classes, DBSCAN clusters; figures are saved in `data/images/analysis/` |
 | `quickquake/frequency_index/FI.ipynb` | Frequency Index classification (VT / LP); first run `QQ_merge_stationxml.py --data_root <your data folder>` |
+| `examples/aniakchak_2023/*.ipynb` | The same two notebooks, set for the example |
 
-Open the notebooks with the `quickquake` environment as kernel. Each notebook has a few lines to edit at the top: the `data` folder of your project and the file prefix (`GAMMA`).
+Open the notebooks with the `quickquake` environment as kernel. Each notebook has a few lines to edit at the top, in its Settings cell: the `data` folder of your project, its `QQ_driver.py`, and the file prefix (`GAMMA`). By default they show the example.
 
 ## Credits
 

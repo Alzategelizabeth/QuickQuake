@@ -74,7 +74,7 @@ NETWORK_COLOURS: Dict[str, str] = {
     "9C": "#bcbd22",   # SIIOS 2018
     "6D": "#e377c2",   # Bowdoin 2019
     "7Q": "#ff7f0e",   # GreenDrill
-    "AV": "#1f77b4",   # Alaska Volcano Observatory (Pavlof example)
+    "AV": "#1f77b4",   # Alaska Volcano Observatory
     "AK": "#9467bd",   # Alaska Regional Network
     "AT": "#2ca02c",   # National Tsunami Warning Center Alaska Seismic Network
     "AM": "#ff7f0e",   # Raspberry Shake network
@@ -7892,12 +7892,18 @@ def plot_event_spectrograms_vertical_picks_only(
     save_png: Optional[Path] = None,
     dpi: int = 300,
     figsize: Optional[Tuple[float, float]] = None,
+    # text sizes (those of plot_event_moveout_pretty)
+    label_fontsize: float = 20,
+    tick_fontsize: float = 17,
+    station_fontsize: float = 15,
+    title_fontsize: float = 17,
 ):
     """
     One figure per event:
       - rows: stations with picks (for this event), sorted by hypocentral distance (near -> far)
       - col 0: Z trace (time)
       - col 1: Z spectrogram (STFT)
+    x = time (UTC). Text sizes as in plot_event_moveout_pretty.
     """
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
@@ -7974,14 +7980,14 @@ def plot_event_spectrograms_vertical_picks_only(
 
     # --- layout ---
     if figsize is None:
-        # Height per station: ~2.3"
-        figsize = (14.0, max(3.0, 2.3 * nsta))
+        # Height per station: ~2.8" (room for the station title above each row)
+        figsize = (16.0, max(3.5, 2.8 * nsta))
 
     fig, axes = plt.subplots(
         nrows=nsta, ncols=2,
         figsize=figsize,
         sharex="col",
-        gridspec_kw={"wspace": 0.15, "hspace": 0.25},
+        gridspec_kw={"wspace": 0.18, "hspace": 0.5},
     )
     if nsta == 1:
         axes = np.array([axes])  # force shape (1,2)
@@ -8111,7 +8117,8 @@ def plot_event_spectrograms_vertical_picks_only(
 
         info = spec_store.get(sid, {"status": "no_data"})
         if info["status"] != "ok":
-            ax_time.set_title(f"{sid} | {dist_km:.1f} km | NO DATA", color="gray", fontsize=11)
+            ax_time.set_title(f"{sid} | {dist_km:.1f} km | NO DATA", color="gray", fontsize=station_fontsize,
+                              loc="left")
             ax_time.set_yticks([])
             ax_spec.set_yticks([])
             ax_time.axvline(t0_num, color=origin_color, linestyle=origin_ls, linewidth=1.1, alpha=0.85)
@@ -8142,10 +8149,10 @@ def plot_event_spectrograms_vertical_picks_only(
                 elif ph == "S":
                     ax_time.axvline(x, color=s_color, linewidth=pick_lw, alpha=0.9)
 
-        ax_time.set_title(f"{sid} | {dist_km:.1f} km | {chosen_ch}", fontsize=11)
+        ax_time.set_title(f"{sid} | {dist_km:.1f} km | {chosen_ch}", fontsize=station_fontsize, loc="left")
         ax_time.grid(True, linestyle=":", alpha=0.5)
         if r == nsta - 1:
-            ax_time.set_xlabel("Time (UTC)")
+            ax_time.set_xlabel("Time (UTC)", fontsize=label_fontsize)
 
         # --- SPECTROGRAM ---
         # Use pcolormesh; shading="auto" avoids manual bin issues
@@ -8174,8 +8181,8 @@ def plot_event_spectrograms_vertical_picks_only(
 
         ax_spec.set_ylim(float(freq_min), min(float(freq_max), fs / 2.0))
         if r == nsta - 1:
-            ax_spec.set_xlabel("Time (UTC)")
-        ax_spec.set_ylabel("Freq [Hz]")
+            ax_spec.set_xlabel("Time (UTC)", fontsize=label_fontsize)
+        ax_spec.set_ylabel("Frequency (Hz)", fontsize=station_fontsize)
 
     # --- global x formatting ---
     date_format = mdates.DateFormatter("%H:%M:%S")
@@ -8186,14 +8193,16 @@ def plot_event_spectrograms_vertical_picks_only(
             axes[r, c].xaxis.set_major_locator(locator)
             axes[r, c].xaxis.set_major_formatter(date_format)
             axes[r, c].tick_params(axis="x", labelrotation=25)
+            axes[r, c].tick_params(axis="both", labelsize=tick_fontsize, length=6, width=1.2)
+            axes[r, c].yaxis.offsetText.set_fontsize(tick_fontsize)
 
     # --- common labels ---
-    axes[0, 0].set_ylabel("Amplitude")
-    axes[0, 1].set_title("Spectrogram (Z)", fontsize=11)
+    axes[0, 0].set_ylabel("Amplitude", fontsize=station_fontsize)
+    axes[0, 1].set_title("Spectrogram (Z)", fontsize=station_fontsize, loc="left")
 
     fig.suptitle(
-        f"Event spectrograms, vertical Z) | event_id={eid} | {row_event[catc.time]} | window=[-{pre_s}s, +{post_s}s]",
-        fontsize=12,
+        f"Spectrograms (Z)  ·  event {eid}  ·  {row_event[catc.time]}  ·  window -{pre_s:g} s to +{post_s:g} s",
+        fontsize=title_fontsize,
         y=0.995,
     )
 
@@ -8205,7 +8214,8 @@ def plot_event_spectrograms_vertical_picks_only(
     if last_im is not None:
         cax = fig.add_axes([0.92, 0.12, 0.012, 0.76])  # [left, bottom, width, height]
         cbar = fig.colorbar(last_im, cax=cax)
-        cbar.set_label("PSD (dB re 1 count$^2$/Hz)")
+        cbar.set_label("PSD (dB re 1 count$^2$/Hz)", fontsize=station_fontsize)
+        cbar.ax.tick_params(labelsize=tick_fontsize)
 
 
 
@@ -8378,6 +8388,358 @@ def event_ids_from_qc_plots(qc_plot_dir):
     return [int(s.split("_")[1][len("event"):]) for s in stems]
 
 
+# ============================================================
+# QC FIGURE OF SINGLE EVENTS (move out at hypocentral distance + energy-velocity curve)
+# ============================================================
+
+def _add_quickquake_scripts_to_path():
+    """QQ_run.py and QQ_qc.py live next to this file: make them importable from a notebook in any folder."""
+    import sys
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+
+
+def driver_settings(driver_path):
+    """
+    All the settings of a QQ_driver.py, as QQ_run.py runs with them: the settings written in the driver plus
+    the default value of every setting it leaves out (QQ_run.check_settings, which prints the defaults it used).
+
+    The driver file is executed only to read its settings: the pipeline does not start, because a driver
+    runs it only under  if __name__ == "__main__".
+    """
+    import runpy
+    _add_quickquake_scripts_to_path()
+    import QQ_run
+    return QQ_run.check_settings(runpy.run_path(str(Path(driver_path).expanduser().resolve())))
+
+
+def qc_one_event_arguments(settings):
+    """
+    The velocity grid and the keyword arguments of QQ_qc.qc_one_event, built from the driver settings
+    (driver_settings) in the same way QQ_run.py and QQ_qc.py build them for the catalog.
+    """
+    s = settings
+    v_grid = np.flip(np.linspace(float(s["qc_vmin_curve"]), float(s["qc_vmax_curve"]), int(s["qc_vsteps_curve"])))
+    min_total = int(s["qc_min_total_stations"])
+    min_per_v = min_total if s["qc_min_valid_stations_per_v"] is None else int(s["qc_min_valid_stations_per_v"])
+    kwargs = dict(
+        winlen=float(s["qc_winlen"]), energy_type=str(s["qc_energy_type"]),
+        noise_percentile=float(s["qc_noise_percentile"]), signal_percentile=float(s["qc_signal_percentile"]),
+        min_total_stations=min_total, min_valid_stations_per_v=min_per_v,
+        pre_s=float(s["qc_pre_s"]), post_s=float(s["qc_post_s"]),
+        freqmin=float(s["qc_freqmin"]), freqmax=float(s["qc_freqmax"]),
+        vmin_signal=float(s["qc_vmin_signal"]), vmax_signal=float(s["qc_vmax_signal"]),
+        pad_neighbors=bool(s["qc_pad_neighbors"]), geom_correction=bool(s["qc_geom_correction"]),
+        station_normalization=str(s["qc_station_normalization"]), noise_window_s=float(s["qc_noise_window_s"]),
+    )
+    return v_grid, kwargs
+
+
+def qc_example_event_ids(data_root, *, namebase="GAMMA", start=None, end=None, center_lat=None, center_lon=None,
+                         radius_km=None, min_stations=5):
+    """
+    Two events to show the QC: the accepted event with the highest QC value among those with at least
+    min_stations stations in the QC (so its move out has enough traces), and the rejected event with the
+    lowest QC value. Only events between start and end and within radius_km of the centre (None = no cut).
+
+    Returns a list of event ids, accepted first; an event is missing when none qualifies (it is printed).
+    """
+    out_dir = Path(data_root) / "merged" / "output"
+    ids = []
+    for kind in ("accepted", "rejected"):
+        csv = out_dir / f"{namebase}_hypodd_catalog_noglitch_qc{kind}.csv"
+        if not csv.exists():
+            print(f"[qc examples] not found: {csv}")
+            continue
+        df = pd.read_csv(csv)
+        t = pd.to_datetime(df["time"], utc=True)
+        keep = df["pc_ratio_energy"].notna()
+        if start is not None:
+            keep &= t >= pd.to_datetime(start, utc=True)
+        if end is not None:
+            keep &= t <= pd.to_datetime(end, utc=True)
+        if radius_km is not None:
+            keep &= _haversine_km(df["latitude"], df["longitude"], center_lat, center_lon) <= float(radius_km)
+        if kind == "accepted" and "qc_n_stations" in df:
+            keep &= df["qc_n_stations"] >= int(min_stations)
+        df = df[keep]
+        if df.empty:
+            print(f"[qc examples] no {kind} event in the time and radius window"
+                  + (f" with at least {min_stations} stations" if kind == "accepted" else ""))
+            continue
+        df = df.sort_values("pc_ratio_energy", ascending=(kind == "rejected"))
+        ids.append(int(df["event_id"].iloc[0]))
+    return ids
+
+
+def qc_event_curves(event_ids, *, data_root, settings, namebase=None, show_v_min=None, verbose=True):
+    """
+    Compute again the QC of some events with QQ_qc.qc_one_event and the QC settings of the driver
+    (settings = driver_settings(...)), keeping the energy-velocity curve and the traces the QC used.
+
+    show_v_min (km/s): also compute the curve down to this velocity, only to draw it; q, e_noise and e_signal
+    stay those of the QC grid, as in the catalog (they are percentiles of the whole grid, so a wider grid
+    would change them).
+
+    Returns one dict per event (events whose QC cannot be computed are printed and left out):
+      event_id; time (UTCDateTime); q (QC value); v_peak and e_peak (velocity and energy of the peak of the
+      curve on the QC grid); v, e (the velocity grid and the curve); e_noise, e_signal (the two percentiles);
+      rows (one (trace, hypocentral distance in km, noise level) per station, nearest first); share (fraction
+      of the energy at the peak that comes from each station, same order: the curve is a mean, so one loud
+      station can decide where the peak is).
+    """
+    _add_quickquake_scripts_to_path()
+    import QQ_qc as qc
+
+    v_grid, kwargs = qc_one_event_arguments(settings)
+    namebase = namebase or settings.get("location_namebase", "GAMMA")
+    min_ratio = float(settings["qc_min_ratio"])
+    data_root = Path(data_root)
+    catalog_csv, picks_csv, stations_json = qc.resolve_paths(data_root, namebase)[:3]
+    _, catalog, picks, stations = qc.load_inputs(catalog_csv, picks_csv, stations_json)
+    event_to_station_ids = qc.build_event_pick_index(picks)
+    times, dirs = qc.build_chunk_index(data_root)
+    cache = qc.StreamCache()
+    common = dict(make_plot=False, plot_dir=Path("."), return_curve=True, **kwargs)
+
+    events = []
+    for eid in event_ids:
+        selected = catalog[catalog["event_id"] == int(eid)]
+        if selected.empty:
+            print(f"event {eid}: not in {catalog_csv.name}")
+            continue
+        row_event = selected.iloc[0]
+        r = qc.qc_one_event(row_event, event_to_station_ids, stations, times, dirs, cache, v_grid=v_grid, **common)
+        if r["qc_status"] != "computed":
+            print(f"event {eid}: QC not computed ({r['qc_reason']})")
+            continue
+        full = r
+        if show_v_min is not None and float(show_v_min) < float(v_grid.min()):
+            low_v = np.flip(np.arange(float(show_v_min), float(v_grid.min()), 0.04))
+            full = qc.qc_one_event(row_event, event_to_station_ids, stations, times, dirs, cache,
+                                   v_grid=np.r_[v_grid, low_v], **common)
+        t0 = qc.UTCDateTime(row_event["time"].to_pydatetime())
+        i_peak = int(np.nanargmax(r["energies"]))
+        v_peak, e_peak = float(r["v_grid"][i_peak]), float(r["energies"][i_peak])
+        rows = sorted(full["prepped"].values(), key=lambda p: p[1])   # nearest station first
+        at_peak = np.array([qc.window_energy_stat(tr, t0 + dkm / v_peak, win_len_s=kwargs["winlen"],
+                                                  energy_type=kwargs["energy_type"]) / noise
+                            for tr, dkm, noise in rows])
+        share = at_peak / at_peak.sum() if np.nansum(at_peak) > 0 else np.full(len(rows), np.nan)
+        q = float(r["pc_ratio_energy"])
+        if verbose:
+            print(f"event {eid}  {str(t0)[:19]}  stations {len(rows)}  Q = {q:.2f} -> "
+                  f"{'accepted' if q >= min_ratio else 'rejected'} (threshold {min_ratio:g})  "
+                  f"peak at {v_peak:.2f} km/s | share of the peak by station, nearest first: "
+                  + " ".join(f"{100 * x:.0f}" for x in share) + " %")
+        events.append(dict(event_id=int(eid), time=t0, q=q, v_peak=v_peak, e_peak=e_peak,
+                           v=full["v_grid"], e=full["energies"], e_noise=float(r["e_noise"]),
+                           e_signal=float(r["e_signal"]), rows=rows, share=share))
+    return events
+
+
+def _qc_axes_style(ax, tick_fontsize):
+    """Tick size and width as in the other publication figures, and no box on top and on the right."""
+    ax.tick_params(axis="both", labelsize=tick_fontsize, length=7, width=1.4)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_linewidth(1.4)
+
+
+def draw_qc_event(
+    ax_moveout,
+    ax_curve,
+    ev,
+    *,
+    qc_v_slow,
+    qc_v_fast,
+    winlen,
+    noise_percentile=50.0,
+    signal_percentile=90.0,
+    by_noise=True,
+    y_limits=None,
+    left_column=True,
+    min_ratio=None,
+    # look (the sizes of plot_event_moveout_pretty)
+    label_fontsize=20,
+    tick_fontsize=17,
+    text_fontsize=15,
+    title_fontsize=17,
+    trace_lw=0.7,
+    trace_colours=None,
+    peak_color="#d62728",
+    band_color="0.88",
+    window_color="#f2b0ae",
+):
+    """
+    Draw the QC of one event on two axes, as in the QC figure of the QuickQuake paper.
+
+    ax_moveout: the vertical traces the QC used (filtered with the QC band), each scaled to its own maximum
+      and drawn at its hypocentral distance; x = seconds from origin time. The QC predicts the arrivals with
+      t = d / v, so one velocity is a straight line from the origin. Gray: where the velocities of the QC grid
+      predict the arrivals. Red: the QC window (winlen seconds) at the velocity of the peak of the curve; the
+      energy inside these windows makes the peak.
+    ax_curve: the energy-velocity curve on a log axis, with its two percentiles (dashed); the distance between
+      them is the QC value Q. The red dot is the peak.
+
+    ev: one dict of qc_event_curves (event_id, time, q, v_peak, e_peak, v, e, e_noise, e_signal, rows).
+    qc_v_slow, qc_v_fast: slowest and fastest velocity of the QC grid (km/s); winlen: QC window (s).
+    by_noise: the energies are divided by the noise level of each station ("noise" mode); only the label changes.
+    y_limits: limits of the log energy axis (None = from this event's curve).
+    left_column: draw the y labels and the window label (False for the other columns of a figure with several
+      events, which share the y axis).
+    min_ratio: the QC threshold; when given, the Q label also says whether the event was accepted or rejected.
+    """
+    colours = trace_colours or MOVEOUT_TRACE_COLOURS
+    trace_half_height = 0.024   # half the height of each trace and of its window, as a share of the distance axis
+
+    # move out
+    ax = ax_moveout
+    d_far = ev["rows"][-1][1]
+    d_line = np.array([0.0, 1.06 * d_far])   # t = d / v is a straight line from the origin
+    t_max = d_far / qc_v_slow + 5
+    half_height = trace_half_height * d_line[1]
+    ax.fill_betweenx(d_line, d_line / qc_v_fast, d_line / qc_v_slow, color=band_color, lw=0, zorder=0)
+    for k, (tr, dkm, _) in enumerate(ev["rows"]):
+        t_window = dkm / ev["v_peak"]
+        ax.fill_betweenx([dkm - half_height, dkm + half_height], t_window - winlen / 2, t_window + winlen / 2,
+                         color=window_color, lw=0, zorder=1)
+        t = tr.times() + (tr.stats.starttime - ev["time"])
+        keep = (t >= -5) & (t <= t_max)
+        y = tr.data[keep]
+        if y.size == 0:
+            continue
+        ax.plot(t[keep], dkm + half_height * y / (np.abs(y).max() or 1), lw=trace_lw, zorder=2,
+                color=colours[k % len(colours)])
+    ax.axvline(0, color="black", lw=0.8, ls=":", zorder=1)
+    ax.set_xlim(-5, t_max)
+    ax.set_ylim(*d_line)
+    if left_column:
+        ax.set_ylabel("Hypocentral distance (km)", fontsize=label_fontsize)
+        # one label for the window, above the farthest station
+        ax.text(d_far / ev["v_peak"], d_far + half_height, f"{winlen:g} s", fontsize=text_fontsize,
+                ha="center", va="bottom")
+    ax.set_xlabel("Seconds from origin time", fontsize=label_fontsize)
+    ax.set_title(f"Event {ev['event_id']}, {str(ev['time'])[:19].replace('T', ' ')}", fontsize=title_fontsize)
+    _qc_axes_style(ax, tick_fontsize)
+
+    # energy-velocity curve, on a log axis: the distance between the two percentiles is Q
+    ax = ax_curve
+    if y_limits is None:
+        e = np.asarray(ev["e"], dtype=float)
+        e = e[np.isfinite(e) & (e > 0)]
+        y_limits = 10.0 ** np.floor(np.log10(e.min())), 10.0 ** np.ceil(np.log10(e.max()))
+    ax.plot(ev["v"], ev["e"], "k-", lw=2, zorder=3)
+    ax.plot(ev["v_peak"], ev["e_peak"], "o", color=peak_color, ms=11, zorder=4)
+    ax.annotate(f"{ev['v_peak']:.1f} km/s", (ev["v_peak"], ev["e_peak"]), xytext=(7, 7),
+                textcoords="offset points", fontsize=text_fontsize, ha="left", va="bottom")
+    for level, name, va in ((ev["e_signal"], f"$P_{{{signal_percentile:g}}}$", "bottom"),
+                            (ev["e_noise"], f"$P_{{{noise_percentile:g}}}$", "top")):
+        ax.axhline(level, color="0.25", ls="--", lw=1.4, zorder=2)
+        ax.text(1.01, level, name, transform=ax.get_yaxis_transform(), fontsize=text_fontsize, va=va,
+                clip_on=False)
+    ax.set_yscale("log")
+    ax.set_ylim(*y_limits)
+    ax.set_xlim(float(np.min(ev["v"])), float(np.max(ev["v"])))
+    q_label = f"Q = {ev['q']:.1f}"
+    if min_ratio is not None:
+        q_label += f"  ({'accepted' if ev['q'] >= float(min_ratio) else 'rejected'})"
+    ax.text(1.0, 1.02, q_label, transform=ax.transAxes, fontsize=label_fontsize, fontweight="bold",
+            ha="right", va="bottom")   # above the panel: the curve can reach the top
+    ax.set_xlabel("Trial velocity (km/s)", fontsize=label_fontsize)
+    if left_column:
+        ax.set_ylabel("Stacked energy / noise" if by_noise else "Stacked energy", fontsize=label_fontsize)
+    else:
+        ax.tick_params(axis="y", labelleft=False)
+    ax.minorticks_off()
+    _qc_axes_style(ax, tick_fontsize)
+
+
+def plot_qc_event(ev, *, qc_v_slow, qc_v_fast, winlen, noise_percentile=50.0, signal_percentile=90.0,
+                  by_noise=True, min_ratio=None, figsize=(8.0, 14.0), save_path=None, dpi=150, **style):
+    """
+    QC figure of one event: move out on top and energy-velocity curve below (see draw_qc_event; style =
+    its look arguments). QQ_qc.py --make_plot draws its figures with this function.
+
+    Returns fig, (ax_moveout, ax_curve).
+    """
+    import matplotlib.pyplot as plt
+
+    fig, (ax_moveout, ax_curve) = plt.subplots(2, 1, figsize=figsize,
+                                               gridspec_kw={"height_ratios": [2.2, 1], "hspace": 0.25})
+    draw_qc_event(ax_moveout, ax_curve, ev, qc_v_slow=qc_v_slow, qc_v_fast=qc_v_fast, winlen=winlen,
+                  noise_percentile=noise_percentile, signal_percentile=signal_percentile, by_noise=by_noise,
+                  min_ratio=min_ratio, **style)
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight", pad_inches=0.03, dpi=int(dpi))
+    return fig, (ax_moveout, ax_curve)
+
+
+def plot_qc_events(
+    event_ids,
+    *,
+    data_root,
+    driver,
+    namebase=None,
+    show_v_min=None,
+    min_ratio=None,
+    column_width_in=8.0,
+    height_in=14.0,
+    save_path=None,
+    dpi=300,
+    verbose=True,
+    **style,
+):
+    """
+    QC figure of one or more events, one column per event in the order given (the QC figure of the
+    QuickQuake paper): move out on top and energy-velocity curve below, drawn by draw_qc_event (style = its
+    look arguments). The log energy axis is shared by all the columns, so Q can be compared between events.
+
+    The curves are computed again with QQ_qc.py and the QC settings of `driver` (the QQ_driver.py of the
+    run), so they are the curves that accepted or rejected the events (see qc_event_curves).
+    min_ratio: when given (e.g. the driver's qc_min_ratio), the Q label says accepted or rejected.
+
+    Returns fig, axes (2 rows x one column per event), events (see qc_event_curves); fig and axes are None
+    when no event could be computed.
+    """
+    import matplotlib.pyplot as plt
+
+    settings = driver_settings(driver)
+    events = qc_event_curves(event_ids, data_root=data_root, settings=settings, namebase=namebase,
+                             show_v_min=show_v_min, verbose=verbose)
+    if not events:
+        print("[qc figure] no event to draw")
+        return None, None, events
+
+    v_grid, kwargs = qc_one_event_arguments(settings)
+    qc_args = dict(qc_v_slow=float(v_grid.min()), qc_v_fast=float(v_grid.max()), winlen=kwargs["winlen"],
+                   noise_percentile=kwargs["noise_percentile"], signal_percentile=kwargs["signal_percentile"],
+                   by_noise=kwargs["station_normalization"] == "noise", min_ratio=min_ratio)
+    energy = np.concatenate([ev["e"][np.isfinite(ev["e"]) & (ev["e"] > 0)] for ev in events])
+    y_limits = 10.0 ** np.floor(np.log10(energy.min())), 10.0 ** np.ceil(np.log10(energy.max()))
+
+    n = len(events)
+    fig, axes = plt.subplots(2, n, figsize=(float(column_width_in) * n, float(height_in)), squeeze=False,
+                             gridspec_kw={"height_ratios": [2.2, 1], "hspace": 0.25, "wspace": 0.17})
+    for col, ev in enumerate(events):
+        draw_qc_event(axes[0, col], axes[1, col], ev, y_limits=y_limits, left_column=(col == 0), **qc_args, **style)
+
+    letters = iter("abcdefghijklmnopqrstuvwxyz")
+    for row in range(2):   # (a), (b) on top, then the curves
+        for col in range(n):
+            add_panel_label(axes[row, col], f"({next(letters)})")
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight", dpi=int(dpi))
+    return fig, axes, events
+
+
 # Backward-compatible private name from exploratory notebook.
 _draw_3d_box_edges = draw_3d_box_edges
 _style_3d_axes = style_3d_axes
@@ -8409,6 +8771,13 @@ __all__ = [
     "plot_event_moveout_picks_only",
     "plot_event_moveout_pretty",
     "event_ids_from_qc_plots",
+    "driver_settings",
+    "qc_one_event_arguments",
+    "qc_example_event_ids",
+    "qc_event_curves",
+    "draw_qc_event",
+    "plot_qc_event",
+    "plot_qc_events",
     "plot_event_spectrograms_vertical_picks_only",
     "ellipse_lonlat_from_km",
     "plot_catalog_3d_topo_seismicity",

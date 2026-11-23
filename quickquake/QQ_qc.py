@@ -48,7 +48,8 @@ Station normalization (--station_normalization):
     5) merged/output/{namebase}_hypodd_catalog_noglitch_qcskipped.csv
        (base HypoDD catalog + QC columns, events for which the value could NOT be computed)
 
-    6) (optional) merged/output/qc_plots_{namebase}/qc_eventXXXX_YYYYmmddTHHMMSS.png
+    6) (optional, --make_plot) merged/output/qc_plots_{namebase}/qc_eventXXXX_YYYYmmddTHHMMSS.png
+       (QC figure of --max_plots random events: move out on top, energy-velocity curve below)
 """
 
 from pathlib import Path
@@ -87,6 +88,8 @@ GEOM_CORRECTION = False   # --geom_correction: multiply energy by distance^2
 EPS = 1e-12               # numerical safety term (internal)
 
 MAX_EVENTS = 0            # --max_events: 0 = all events
+PLOT_SEED = 0             # seed of the random choice of the events that get a QC figure (internal): with the
+                          # same catalog, every run draws the same events
 
 MIN_TOTAL_STATIONS = 4    # --min_total_stations
 
@@ -402,6 +405,17 @@ def build_event_pick_index(picks_clean: pd.DataFrame):
     return event_to_station_ids
 
 
+def events_to_plot(event_ids, max_plots, seed: int = PLOT_SEED) -> set:
+    """
+    The events that get a QC figure: max_plots of event_ids chosen at random (all of them when max_plots is
+    None or larger than the catalog). The seed is fixed, so the same catalog always gives the same events.
+    """
+    ids = np.asarray(event_ids)
+    if max_plots is None or int(max_plots) >= len(ids):
+        return set(ids.tolist())
+    return set(np.random.default_rng(seed).choice(ids, size=int(max_plots), replace=False).tolist())
+
+
 def build_skip_result(eid: int, reason: str):
     return {
         "event_id": int(eid),
@@ -551,7 +565,10 @@ def qc_one_event(
     station_normalization: str = STATION_NORMALIZATION,
     noise_window_s: float = NOISE_WINDOW_S,
     return_curve: bool = False,
+    plot_min_ratio: Optional[float] = None,
 ):
+    # make_plot: save the QC figure of this event (move out on top, energy-velocity curve below, as in the
+    # QuickQuake paper) in plot_dir; plot_min_ratio (the threshold) only adds "accepted" or "rejected" to it.
     if not (0.0 < float(noise_percentile) < 100.0 and 0.0 < float(signal_percentile) < 100.0):
         raise ValueError("noise_percentile and signal_percentile must be in the range (0, 100).")
     if float(signal_percentile) <= float(noise_percentile):
@@ -701,96 +718,23 @@ def qc_one_event(
     ratio = float(e_signal / (e_noise + float(EPS)))
 
     if make_plot:
-        i_peak = int(np.nanargmax(np.where(sig_mask, energies, -np.inf)))
-        best_v = float(v_grid[i_peak])
-
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import qq_helpers   # the drawing of the QC figure (same as the notebooks and the paper), next to this file
 
-        # -------------------------
-        # Plot style, same as moveout reference
-        # -------------------------
-        figsize = (10, 7)
-        label_fontsize = 18
-        tick_fontsize = 20
-        title_fontsize = 17
-        legend_fontsize = 15
-
-        fig, ax = plt.subplots(figsize=figsize)
-
-        ax.plot(v_grid, energies, "k-", lw=2)
-
-        highlight_w = 0.15
-        x0 = best_v - 0.5 * highlight_w
-        x1 = best_v + 0.5 * highlight_w
-
-        ax.axvspan(x0, x1, color="red", alpha=0.18, zorder=0)
-        ax.axvline(best_v, color="red", lw=1.2, alpha=0.8)
-
-        ax.axhline(
-            e_noise,
-            color="tab:orange",
-            lw=2.0,
-            label=f"P{noise_percentile:.0f}={e_noise:.2e}",
-        )
-
-        ax.axhline(
-            e_signal,
-            color="tab:cyan",
-            lw=2.0,
-            label=f"P{signal_percentile:.0f}={e_signal:.2e}",
-        )
-
-        ax.set_title(
-            f"event_id={eid} | {t0.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"P{signal_percentile:.0f}/P{noise_percentile:.0f}={ratio:.2f}",
-            fontsize=title_fontsize,
-            pad=12,
-        )
-
-        ax.set_xlabel("Velocity (km/s)", fontsize=label_fontsize, labelpad=10)
-        ax.set_ylabel("Stacked Energy / noise" if by_noise else "Stacked Energy",
-                      fontsize=label_fontsize, labelpad=10)
-
-        ax.tick_params(
-            axis="both",
-            which="major",
-            labelsize=tick_fontsize,
-            length=7,
-            width=1.4,
-        )
-
-        # Enlarge the axis offset text (e.g. 1e-5 / 1e-6) when it appears
-        ax.xaxis.offsetText.set_fontsize(tick_fontsize)
-        ax.yaxis.offsetText.set_fontsize(tick_fontsize)
-
-        for spine in ax.spines.values():
-            spine.set_linewidth(1.2)
-
-        ax.grid(ls="-", alpha=0.15)
-
-        leg = ax.legend(fontsize=legend_fontsize)
-        if leg is not None:
-            leg.get_frame().set_linewidth(0.8)
-
-        fig.subplots_adjust(
-            left=0.14,
-            right=0.97,
-            bottom=0.13,
-            top=0.90,
-        )
-
+        # the peak of the curve sets the red windows of the move out; Q does not depend on it
+        i_peak = int(np.nanargmax(energies))
+        event = dict(event_id=eid, time=t0, q=ratio, v_peak=float(v_grid[i_peak]), e_peak=float(energies[i_peak]),
+                     v=v_grid, e=energies, e_noise=e_noise, e_signal=e_signal,
+                     rows=sorted(prepped.values(), key=lambda p: p[1]))   # nearest station first
+        fig, _ = qq_helpers.plot_qc_event(
+            event, qc_v_slow=float(np.min(v_grid)), qc_v_fast=float(np.max(v_grid)), winlen=float(winlen),
+            noise_percentile=float(noise_percentile), signal_percentile=float(signal_percentile),
+            by_noise=by_noise, min_ratio=plot_min_ratio)
         plot_dir.mkdir(parents=True, exist_ok=True)
-        out_png = plot_dir / f"qc_event{eid}_{t0.strftime('%Y%m%dT%H%M%S')}.png"
-
-        fig.savefig(
-            out_png,
-            dpi=150,
-            bbox_inches="tight",
-            pad_inches=0.03,
-        )
-
+        fig.savefig(plot_dir / f"qc_event{eid}_{t0.strftime('%Y%m%dT%H%M%S')}.png",
+                    dpi=150, bbox_inches="tight", pad_inches=0.03)
         plt.close(fig)
 
     result = {
@@ -849,12 +793,14 @@ def main():
     ap.add_argument("--glitch_min_seconds", type=float, default=MIN_STUCK_SECONDS,
                     help=f"Shortest stretch without change that counts as stuck, in seconds (default: {MIN_STUCK_SECONDS})")
 
-    ap.add_argument("--make_plot", action="store_true", help="Save QC plots to merged/output/qc_plots_{namebase}/")
+    ap.add_argument("--make_plot", action="store_true",
+                    help="Save QC figures (move out and energy-velocity curve) of --max_plots random events "
+                         "in merged/output/qc_plots_{namebase}/; the figures of the previous run are removed")
     ap.add_argument(
         "--max_plots",
         type=lambda s: None if str(s).strip().lower() in ("none", "all") else int(s),
         default=20,
-        help="Max number of plots to save when --make_plot is enabled (default: 20; 'None' = plot all events)",
+        help="Number of random events with a QC figure when --make_plot is enabled (default: 20; 'None' = all events)",
     )
     ap.add_argument(
         "--min_total_stations",
@@ -939,21 +885,32 @@ def main():
 
     # Step 2: QC value of every event left
 
-    plot_dir = data_root / "merged" / "output" / f"qc_plots_{namebase}"
-    plots_left = np.inf if args.max_plots is None else int(args.max_plots)
     v_grid = np.flip(np.linspace(float(args.vmin_curve), float(args.vmax_curve), int(args.vsteps_curve)))
 
     rows = []
     n_total = len(catalog) if int(args.max_events) <= 0 else min(len(catalog), int(args.max_events))
+
+    # QC figures (move out + energy-velocity curve) of max_plots events chosen at random, so they show the
+    # whole catalog and not only its first events. The figures of the previous QC run are removed first,
+    # so the folder holds only the figures of this run.
+    plot_dir = data_root / "merged" / "output" / f"qc_plots_{namebase}"
+    plot_ids = set()
+    n_figures = 0
+    if bool(args.make_plot):
+        plot_ids = events_to_plot(catalog.iloc[:n_total]["event_id"].astype(int).to_numpy(), args.max_plots)
+        old_figures = sorted(plot_dir.glob("qc_event*_*.png"))
+        for f in old_figures:
+            f.unlink()
+        print(f"[QC] figures of {len(plot_ids)} random events (seed {PLOT_SEED}) -> {plot_dir}"
+              + (f"; {len(old_figures)} figures of the previous QC run removed" if old_figures else ""))
 
     # Events in time order, so the waveform files of a day are read once for all its events
     # (the HypoDD catalog is not in time order). The outputs keep the catalog's order.
     time_order = catalog.iloc[:n_total]["time"].argsort(kind="stable").to_numpy()
     for k, i in enumerate(time_order):
         row_event = catalog.iloc[i]
-        do_plot = bool(args.make_plot) and (plots_left > 0)
+        do_plot = int(row_event["event_id"]) in plot_ids
 
-        
         r = qc_one_event(
             row_event,
             event_to_station_ids,
@@ -980,12 +937,13 @@ def main():
             geom_correction=args.geom_correction,
             station_normalization=args.station_normalization,
             noise_window_s=args.noise_window_s,
+            plot_min_ratio=args.min_ratio,
         )
 
         rows.append(r)
 
         if do_plot and r.get("qc_status") == "computed":
-            plots_left -= 1
+            n_figures += 1
 
         if (k + 1) % 500 == 0 or (k + 1) == n_total:
             print(f"[QC] processed {k + 1}/{n_total} events")
@@ -1036,8 +994,8 @@ def main():
     split_by_threshold(raw_out, args.min_ratio, qc_accepted_catalog_csv, qc_rejected_catalog_csv, qc_skipped_catalog_csv)
 
     if bool(args.make_plot):
-        limit = "all" if args.max_plots is None else f"up to {int(args.max_plots)}"
-        print(f"Wrote {limit} plots in: {plot_dir}")
+        print(f"Wrote {n_figures} QC figures (of {len(plot_ids)} random events; events whose QC could not be "
+              f"computed have none) in: {plot_dir}")
 
     if "qc_stations_dropped" in raw_out.columns:
         reasons = raw_out["qc_stations_dropped"].dropna().astype(str).str.split(";").explode()

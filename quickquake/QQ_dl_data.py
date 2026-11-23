@@ -50,6 +50,12 @@ MIN_COVERAGE_FRACTION = 0.80
 MAX_TRANSIENT_RETRIES = 3
 RETRY_SLEEP_SECONDS = 3
 
+# A connection to a data center that comes without a service this script
+# needs is made again this many times, after a pause of
+# SERVICE_PAUSE_SECONDS times the attempt number (see connect).
+SERVICE_ATTEMPTS = 3
+SERVICE_PAUSE_SECONDS = 10
+
 VALID_COMPONENTS = {"E", "N", "Z", "1", "2", "3"}
 
 VALID_UNITS = {
@@ -80,11 +86,51 @@ PREFERRED_COMPONENT_SETS = [
 # CLIENTS
 # ============================================================
 
+def connect(name, services=("dataselect", "station")):
+    """
+    Connection (ObsPy FDSN client) to one data center, with the services
+    asked for: by default the two this script needs, dataselect
+    (waveforms) and station (instrument responses). QQ_dl_stations.py
+    uses it too, with station only.
+
+    When it first contacts a data center, ObsPy asks for its list of
+    services and waits up to 15 s; a service whose answer is late or
+    fails is left out. ObsPy keeps that list, complete or not, while
+    the script runs, and the federator uses the same list. So one late
+    answer made every request of the chunk fail in the Aniakchak
+    2021-2024 run: no waveforms on 2021-05-16, no responses on
+    2023-12-26 and 2024-08-07, no station list on 2023-06-11 and
+    2024-12-19. Here an incomplete list is forgotten and asked for
+    again, after a pause.
+    """
+    for attempt in range(1, SERVICE_ATTEMPTS + 1):
+        client = Client(name)
+        missing = [s for s in services if s not in client.services]
+        if not missing:
+            return client
+
+        # Forget the incomplete list (ObsPy keeps it in this class attribute)
+        getattr(Client, "_Client__service_discovery_cache", {}).clear()
+
+        if attempt < SERVICE_ATTEMPTS:
+            pause = SERVICE_PAUSE_SECONDS * attempt
+            print(
+                f"    {name}: no {' or '.join(missing)} service "
+                f"({attempt}/{SERVICE_ATTEMPTS}); asking again in {pause:g} s"
+            )
+            time.sleep(pause)
+
+    print(f"    warning: {name} still has no {' or '.join(missing)} service")
+    return client
+
+
 def make_clients(client_name, fallback_names=("EARTHSCOPE",)):
     """
     With the EarthScope federator, also return a list of backup
     data centers, tried in order when the federator has no data
     (e.g. GEOFON serves DK.GDH and ETH serves DK.KARAT).
+    Each one is made with connect(); the check of EARTHSCOPE also
+    protects the federator, which uses the same list of services.
     """
     if client_name == "EARTHSCOPE_FEDERATOR":
         primary = RoutingClient(
@@ -96,12 +142,12 @@ def make_clients(client_name, fallback_names=("EARTHSCOPE",)):
         for name in fallback_names:
             try:
                 fallback.append(
-                    Client(name)
+                    connect(name)
                 )
             except Exception:
                 if name == "EARTHSCOPE":
                     fallback.append(
-                        Client("IRIS")
+                        connect("IRIS")
                     )
                 else:
                     print(
@@ -111,7 +157,7 @@ def make_clients(client_name, fallback_names=("EARTHSCOPE",)):
 
         return primary, fallback
 
-    return Client(client_name), []
+    return connect(client_name), []
 
 
 def is_no_data_error(err):
@@ -1210,36 +1256,53 @@ def select_station(
 
             continue
 
-        response_inventory = (
-            request_response_inventory(
-                primary=primary,
-                fallback=fallback,
-                candidate=candidate,
-                components=(
-                    waveform_result[
-                        "components"
-                    ]
-                ),
-                start=start,
-                end=end,
+        # The response is asked for again, after a pause, when it is missing or invalid. Before, one
+        # failed request (a temporary server error) left the station out of the whole chunk: the
+        # Aniakchak 2021-2024 run lost 274 station-days this way, while their waveforms were there.
+        response_result = None
+        for response_attempt in range(1, MAX_TRANSIENT_RETRIES + 1):
+            response_inventory = (
+                request_response_inventory(
+                    primary=primary,
+                    fallback=fallback,
+                    candidate=candidate,
+                    components=(
+                        waveform_result[
+                            "components"
+                        ]
+                    ),
+                    start=start,
+                    end=end,
+                )
             )
-        )
 
-        response_result = (
-            validate_response(
-                candidate=candidate,
-                waveform_result=waveform_result,
-                response_inventory=(
-                    response_inventory
-                ),
+            response_result = (
+                validate_response(
+                    candidate=candidate,
+                    waveform_result=waveform_result,
+                    response_inventory=(
+                        response_inventory
+                    ),
+                )
             )
-        )
+
+            if response_result is not None:
+                break
+
+            if response_attempt < MAX_TRANSIENT_RETRIES:
+                print(
+                    "    response metadata missing or invalid "
+                    f"({response_attempt}/{MAX_TRANSIENT_RETRIES}); "
+                    f"asking again in {RETRY_SLEEP_SECONDS:g} s"
+                )
+                time.sleep(RETRY_SLEEP_SECONDS)
 
         if response_result is None:
             print(
                 "    -> waveform exists, "
                 "but valid response metadata "
-                "was not available"
+                "was not available "
+                f"after {MAX_TRANSIENT_RETRIES} attempts"
             )
 
             attempts.append(

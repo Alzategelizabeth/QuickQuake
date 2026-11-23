@@ -5,7 +5,7 @@ Discover candidate seismic stations for QuickQuake.
 Design:
 - radial geographic search around config["center"]
 - all networks / all stations / all channels
-- EarthScope Federator first, direct EarthScope fallback
+- EarthScope Federator, plus direct EarthScope for the stations the federator did not return
 - exclude synthetic data
 - exclude low-sample-rate channels before waveform download
 - keep only seismic/ground-motion channel families and PhaseNet-compatible components
@@ -18,11 +18,14 @@ import json
 import pickle
 import argparse
 import copy
+import time
 from collections import defaultdict
 
 from obspy import UTCDateTime
-from obspy.clients.fdsn import Client, RoutingClient
+from obspy.clients.fdsn import RoutingClient
 from obspy.clients.fdsn.header import FDSNNoDataException
+
+from QQ_dl_data import connect   # connection that checks the services of a data center
 
 
 # ============================================================
@@ -32,6 +35,8 @@ from obspy.clients.fdsn.header import FDSNNoDataException
 EXCLUDED_NETWORKS = {"SY"}
 EXCLUDED_STATIONS = set()   # stations to skip, written as "NET.STA" (e.g. "DK.ILULI")
 MIN_SAMPLE_RATE = 20.0
+SEARCH_ATTEMPTS = 3         # station search: attempts when the data centers return nothing (internal)
+SEARCH_PAUSE_S = 10.0       # pause before the second attempt, twice as long before the third (internal)
 
 VALID_COMPONENTS = {"E", "N", "Z", "1", "2", "3"}
 
@@ -50,20 +55,22 @@ SEISMIC_SOURCE_CODES = {"H", "L", "N", "P", "M"}
 
 def make_clients(client_name):
     """
-    Use the EarthScope federator when requested and keep
-    direct EarthScope as a fallback.
+    Use the EarthScope federator when requested, and direct EarthScope
+    as well (see discover_inventory). connect() checks that EarthScope
+    has its station service; that also protects the federator, which
+    uses the same list of services.
     """
     if client_name == "EARTHSCOPE_FEDERATOR":
         primary = RoutingClient("earthscope-federator")
 
         try:
-            fallback = Client("EARTHSCOPE")
+            fallback = connect("EARTHSCOPE", services=("station",))
         except Exception:
-            fallback = Client("IRIS")
+            fallback = connect("IRIS", services=("station",))
 
         return primary, fallback
 
-    return Client(client_name), None
+    return connect(client_name, services=("station",)), None
 
 
 def is_no_data_error(err):
@@ -211,12 +218,44 @@ def query_region(
         raise
 
 
+def add_missing_stations(inventory, extra):
+    """
+    Add to `inventory` the stations of `extra` that it does not have
+    (same NET.STA). Returns the stations added, as "NET.STA".
+    """
+    have = {(net.code, sta.code) for net in inventory for sta in net}
+    added = []
+
+    for net in extra:
+        new = [sta for sta in net if (net.code, sta.code) not in have]
+        if not new:
+            continue
+
+        same_network = [n for n in inventory.networks if n.code == net.code]
+        if same_network:
+            same_network[0].stations.extend(new)
+        else:
+            net.stations = new
+            inventory.networks.append(net)
+
+        added += [f"{net.code}.{sta.code}" for sta in new]
+
+    return added
+
+
 def discover_inventory(
     primary,
     fallback,
     config,
     maxradius,
 ):
+    """
+    Station metadata of the region. With the federator, EarthScope is
+    also asked directly, and the stations the federator did not return
+    are added: the federator can come back short without any error
+    (on 2022-08-19 in the Aniakchak 2021-2024 run it returned only the
+    AM Raspberry Shake, without the AV, AK and AT stations).
+    """
     inventory = None
 
     try:
@@ -231,24 +270,33 @@ def discover_inventory(
             f"{err}"
         )
 
-    if (
-        inventory is None
-        and fallback is not None
-    ):
-        print(
-            "[stations] Trying direct EarthScope fallback..."
-        )
+    if fallback is None:
+        return inventory
 
-        try:
-            inventory = query_region(
-                client=fallback,
-                config=config,
-                maxradius=maxradius,
-            )
-        except Exception as err:
+    try:
+        direct = query_region(
+            client=fallback,
+            config=config,
+            maxradius=maxradius,
+        )
+    except Exception as err:
+        print(
+            "[stations] Direct EarthScope metadata query failed: "
+            f"{err}"
+        )
+        direct = None
+
+    if inventory is None:
+        if direct is not None:
+            print("[stations] Using the direct EarthScope metadata")
+        return direct
+
+    if direct is not None:
+        added = add_missing_stations(inventory, direct)
+        if added:
             print(
-                "[stations] Direct metadata query failed: "
-                f"{err}"
+                f"[stations] {len(added)} stations missing from the "
+                f"federator, added from EarthScope: {', '.join(added)}"
             )
 
     return inventory
@@ -509,12 +557,22 @@ def download_stations(
         f"components={sorted(VALID_COMPONENTS)}"
     )
 
-    raw_inventory = discover_inventory(
-        primary=primary,
-        fallback=fallback,
-        config=config,
-        maxradius=maxradius,
-    )
+    # A temporary server error must not lose the whole chunk: the Aniakchak 2021-2024 run lost 9 days
+    # because one search failed. Asked again after a pause, a few times, before giving up.
+    raw_inventory = None
+    for attempt in range(1, SEARCH_ATTEMPTS + 1):
+        raw_inventory = discover_inventory(
+            primary=primary,
+            fallback=fallback,
+            config=config,
+            maxradius=maxradius,
+        )
+        if raw_inventory is not None and raw_inventory.networks:
+            break
+        if attempt < SEARCH_ATTEMPTS:
+            pause = SEARCH_PAUSE_S * attempt
+            print(f"[stations] no station metadata ({attempt}/{SEARCH_ATTEMPTS}); asking again in {pause:g} s")
+            time.sleep(pause)
 
     if (
         raw_inventory is None

@@ -1,0 +1,8 @@
+# QuickQuake's notebooks are stored in Git without their outputs (figures, tables, printed data):
+# the outputs stay in your own copy of the notebook, but Git keeps only the code.
+# The filter has to be turned on once in each copy of the repository (it needs jupyter):
+#   git config filter.nbclear.clean "jupyter nbconvert --to notebook --ClearOutputPreprocessor.enabled=True --stdin --stdout --log-level=ERROR 2>/dev/null"
+#   git config filter.nbclear.smudge cat
+# The notebooks of dependencies/ (PhaseNet, GaMMA) come from their own projects and are left as they are.
+quickquake/**/*.ipynb filter=nbclear
+examples/**/*.ipynb filter=nbclear

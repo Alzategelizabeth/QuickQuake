@@ -156,8 +156,8 @@ qc_winlen = 3
 qc_noise_percentile  = 50.0
 qc_signal_percentile = 90.0
 qc_energy_type = "squared_median" # other option is "envelope_median" or "squared_median"
-qc_make_plot = True
-qc_max_plots = 20 # number of QC figures; set to None to plot every event
+qc_make_plot = True   # QC figures (move out on top, energy-velocity curve below) in merged/output/qc_plots_<namebase>/
+qc_max_plots = 20     # number of random events with a QC figure; None = every event
 qc_pre_s = 10.0       # seconds of waveform before origin time
 qc_post_s = 40.0      # seconds of waveform after origin time
 qc_freqmin = 1.0      # bandpass low corner (Hz)
